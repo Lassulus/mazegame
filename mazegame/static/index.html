@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#0a0e16" />
+    <title>NixOS Maze</title>
+    <link rel="icon" href="/img/nix-snowflake.svg" />
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body class="play">
+    <canvas id="view"></canvas>
+    <div class="vignette"></div>
+    <div class="crosshair"></div>
+    <div id="touchpad" class="touchpad"></div>
+
+    <header class="hud top">
+      <div class="brand">
+        <img src="/img/nix-snowflake.svg" alt="NixOS" />
+        <span>NIXOS MAZE</span>
+      </div>
+      <div class="stats">
+        <span class="chip">player <b id="playername">…</b></span>
+        <span class="chip">time <b id="time">0:00</b></span>
+        <span class="chip">escapes <b id="escapes">0</b></span>
+        <span class="chip" id="status" data-kind="pending">connecting…</span>
+      </div>
+    </header>
+
+    <canvas id="minimap" class="minimap" width="150" height="150"></canvas>
+
+    <div id="watched" class="watched hidden">
+      <span class="dot"></span>ON CAMERA · <b id="watchers">0</b>
+    </div>
+
+    <button id="fullscreen" class="fullscreen" type="button" aria-label="fullscreen">⛶</button>
+
+    <div id="stick" class="stick"></div>
+    <div id="stick-thumb" class="stick-thumb"></div>
+
+    <div id="overlay" class="overlay hidden" data-kind="paused">
+      <div id="overlay-text"></div>
+    </div>
+
+    <footer class="hud bottom">
+      <span class="keys-only"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</span>
+      <span class="keys-only"><kbd>mouse</kbd> / <kbd>←</kbd><kbd>→</kbd> look</span>
+      <span class="keys-only"><kbd>shift</kbd> run</span>
+      <span class="touch-only">left thumb: up walks, sideways turns · push far to run</span>
+      <span>reach the <b>snowflake</b> to escape</span>
+      <span><a href="/watch">watch someone else →</a></span>
+    </footer>
+
+    <script type="module" src="/js/play.js"></script>
+  </body>
+</html>

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#0a0e16" />
+    <title>NixOS Maze · watch</title>
+    <link rel="icon" href="/img/nix-snowflake.svg" />
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body class="watch">
+    <canvas id="view"></canvas>
+    <div class="vignette"></div>
+    <div class="scanlines"></div>
+    <button id="fullscreen" class="fullscreen" type="button" aria-label="fullscreen">⛶</button>
+
+    <header class="hud top">
+      <div class="brand">
+        <img src="/img/nix-snowflake.svg" alt="NixOS" />
+        <span>MAZE CAM</span>
+      </div>
+      <div class="stats">
+        <span class="chip live"><span class="dot"></span>watching <b id="target">—</b></span>
+        <span class="chip">escapes <b id="escapes">0</b></span>
+        <span class="chip">players <b id="players">0</b></span>
+        <span class="chip" id="status" data-kind="pending">connecting…</span>
+      </div>
+    </header>
+
+    <canvas id="minimap" class="minimap" width="130" height="130"></canvas>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <div id="standby" class="standby hidden">
+      <img src="/img/nix-snowflake.svg" alt="" />
+      <h1>NO ONE IN THE MAZE</h1>
+      <p>waiting for a player to <a href="/">start wandering</a></p>
+    </div>
+
+    <footer class="hud bottom">
+      <div class="idle">
+        <span class="idle-label">idle</span>
+        <span class="idle-track"><span id="idlebar" class="idle-bar"></span></span>
+        <span id="idletext" class="idle-text">—</span>
+        <span class="idle-note">switches after 2s without movement</span>
+      </div>
+      <div class="keys">
+        <span class="keys-only"><kbd>space</kbd>/<kbd>N</kbd> next player</span>
+        <span class="keys-only"><kbd>F</kbd> fullscreen</span>
+        <span class="touch-only">tap anywhere for the next player</span>
+        <span><a href="/">play instead →</a></span>
+      </div>
+    </footer>
+
+    <script type="module" src="/js/watch.js"></script>
+  </body>
+</html>
