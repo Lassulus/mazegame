@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mazegame"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Windows 95 style maze you play in a browser tab, with a spectator camera"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,9 @@ mazegame = "mazegame.__main__:main"
 
 [tool.setuptools]
 packages = ["mazegame"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mazegame.__version__" }
 
 [tool.setuptools.package-data]
 mazegame = ["static/*.html", "static/css/*.css", "static/js/*.js", "static/img/*.svg"]

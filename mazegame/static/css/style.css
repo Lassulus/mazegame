@@ -56,24 +56,6 @@ body {
   );
 }
 
-.crosshair {
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 3px;
-  height: 3px;
-  margin: -1.5px 0 0 -1.5px;
-  border-radius: 50%;
-  background: rgba(216, 228, 242, 0.55);
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-body.locked .crosshair {
-  opacity: 1;
-}
-
 /* ---- hud ---- */
 
 .hud {
@@ -150,6 +132,11 @@ body.locked .crosshair {
 .chip[data-kind="bad"] {
   color: #ffb4a2;
   border-color: rgba(255, 120, 100, 0.5);
+}
+
+.chip.version {
+  opacity: 0.45;
+  letter-spacing: 0.12em;
 }
 
 .chip.live {
@@ -546,8 +533,7 @@ body.touch .touch-only {
   display: inline;
 }
 
-body.touch .keys-only,
-body.touch .crosshair {
+body.touch .keys-only {
   display: none;
 }
 

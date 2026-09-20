@@ -91,10 +91,10 @@ function floorTexture(size = 64) {
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const checker = ((x >> 5) ^ (y >> 5)) & 1;
-      const base = checker ? 86 : 70; // worn sandstone flagstones
-      const grout = x % 32 < 2 || y % 32 < 2 ? -26 : 0;
-      const n = rnd() * 12 - 6;
-      px[y * size + x] = pack(base + 6 + n + grout, base - 4 + n + grout, base - 16 + n + grout);
+      const base = checker ? 140 : 118; // worn sandstone flagstones
+      const grout = x % 32 < 2 || y % 32 < 2 ? -34 : 0;
+      const n = rnd() * 14 - 7;
+      px[y * size + x] = pack(base + 8 + n + grout, base - 4 + n + grout, base - 20 + n + grout);
     }
   }
   return px;
@@ -105,9 +105,9 @@ function ceilingTexture(size = 64) {
   const px = new Uint32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const beam = y % 32 < 3 ? 16 : 0; // dark timber joists
-      const n = rnd() * 8 - 4;
-      px[y * size + x] = pack(58 + n + beam, 45 + n + beam, 40 + n + beam);
+      const beam = y % 32 < 3 ? 22 : 0; // timber joists
+      const n = rnd() * 10 - 5;
+      px[y * size + x] = pack(104 + n + beam, 88 + n + beam, 78 + n + beam);
     }
   }
   return px;

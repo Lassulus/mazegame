@@ -5,6 +5,7 @@ import { WIN_DWELL, buildMaze } from "./maze.js";
 import { Renderer, drawMinimap, retroPixel } from "./render.js";
 import { createSocket } from "./net.js";
 import { isTouch, wireFullscreen } from "./touch.js";
+import { showVersion } from "./version.js";
 
 const IDLE_LIMIT = 2000; // must match hub.IDLE_SWITCH
 const SMOOTH = 16; // camera catch-up rate
@@ -153,5 +154,6 @@ addEventListener("resize", () => renderer.resize());
 
 renderer.init().then(() => {
   standby(true);
+  showVersion(document.getElementById("version"));
   requestAnimationFrame(frame);
 });

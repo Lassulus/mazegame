@@ -4,6 +4,7 @@ import { WIN_DWELL, buildMaze, solid } from "./maze.js";
 import { Renderer, drawMinimap, retroPixel } from "./render.js";
 import { createSocket } from "./net.js";
 import { createTouchControls, isTouch, wireFullscreen } from "./touch.js";
+import { showVersion } from "./version.js";
 
 const WALK = 2.7; // tiles/second
 const RUN = 4.3;
@@ -12,9 +13,6 @@ const MOUSE = 0.0022;
 const RADIUS = 0.24;
 const SEND_HZ = 20;
 const WIN_DIST = 0.9;
-
-const MOUSE_HINT = "click to grab the mouse";
-const TOUCH_HINT = "drag the left side to walk and steer";
 
 const view = document.getElementById("view");
 const minimap = document.getElementById("minimap");
@@ -122,18 +120,9 @@ addEventListener("keyup", (e) => {
 });
 addEventListener("blur", () => keys.clear());
 
+// Clicking the view grabs the mouse; no card, no crosshair, just the maze.
 view.addEventListener("click", () => {
   if (!isTouch) view.requestPointerLock();
-});
-elOverlay.addEventListener("click", () => {
-  if (isTouch) hideOverlay();
-  else view.requestPointerLock();
-});
-document.addEventListener("pointerlockchange", () => {
-  const locked = document.pointerLockElement === view;
-  document.body.classList.toggle("locked", locked);
-  if (locked && !state.won) hideOverlay();
-  else if (!state.won && !isTouch) showOverlay(MOUSE_HINT, "paused");
 });
 document.addEventListener("mousemove", (e) => {
   if (document.pointerLockElement === view) state.cam.a += e.movementX * MOUSE;
@@ -145,9 +134,6 @@ const touch = createTouchControls(touchpad, {
   thumb: document.getElementById("stick-thumb"),
 });
 wireFullscreen(document.getElementById("fullscreen"));
-touchpad.addEventListener("pointerdown", () => {
-  if (!state.won) hideOverlay();
-});
 
 function showOverlay(text, kind) {
   elOverlayText.innerHTML = text;
@@ -262,7 +248,7 @@ function join(name) {
   else localStorage.removeItem(NAME_KEY);
   elJoin.classList.add("hidden");
   connect(clean);
-  showOverlay(isTouch ? TOUCH_HINT : MOUSE_HINT, "paused");
+
   if (!isTouch) {
     const lock = view.requestPointerLock();
     if (lock && lock.catch) lock.catch(() => {}); // refused if unfocused; harmless
@@ -277,6 +263,7 @@ elJoinForm.addEventListener("submit", (e) => {
 renderer.init().then(() => {
   if (!state.maze) setMaze((Math.random() * 2 ** 32) >>> 0);
   document.body.classList.toggle("touch", isTouch);
+  showVersion(document.getElementById("version"));
   requestAnimationFrame(frame);
 
   // A name in the URL is an explicit choice (shared links, kiosks): skip the

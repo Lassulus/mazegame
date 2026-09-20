@@ -13,6 +13,10 @@ Two pages:
 No build step, no dependencies: the server is Python standard library only
 (including the WebSocket implementation) and the client is plain ES modules.
 
+The running version is shown in the HUD and served at `/api/version`.
+`mazegame/__init__.py` is the only place it is written down: `pyproject.toml`
+and `flake.nix` both read `__version__` from there.
+
 ## Run
 
 ```sh

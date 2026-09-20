@@ -14,11 +14,16 @@
       ];
       forAllSystems = fn: nixpkgs.lib.genAttrs systems (system: fn nixpkgs.legacyPackages.${system});
 
+      # One source of truth for the version: mazegame/__init__.py.
+      version = builtins.head (
+        builtins.match ".*__version__ = \"([^\"]+)\".*" (builtins.readFile ./mazegame/__init__.py)
+      );
+
       mkMazegame =
         pkgs:
         pkgs.python3Packages.buildPythonApplication {
           pname = "mazegame";
-          version = "1.0.0";
+          inherit version;
           pyproject = true;
           src = ./.;
           build-system = [ pkgs.python3Packages.setuptools ];

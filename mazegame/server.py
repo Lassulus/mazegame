@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import __version__
 from .hub import Hub
 from .ws import WebSocket, WSError, accept_key
 
@@ -26,7 +27,7 @@ mimetypes.add_type("text/javascript", ".js")
 
 class MazeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "mazegame"
+    server_version = f"mazegame/{__version__}"
     sys_version = ""
     timeout = 30
 
@@ -43,8 +44,10 @@ class MazeHandler(BaseHTTPRequestHandler):
             self._serve_socket(self._play_loop, query)
         elif route == "/ws/watch":
             self._serve_socket(self._watch_loop, query)
+        elif route == "/api/version":
+            self._send_json({"version": __version__})
         elif route == "/api/state":
-            self._send_json(self.hub.stats())
+            self._send_json({"version": __version__, **self.hub.stats()})
         elif route in ("/", "/play", "/index.html"):
             self._send_file(STATIC_ROOT / "index.html")
         elif route in ("/watch", "/watch.html"):
