@@ -9,8 +9,8 @@ import { makeTrack, pushSample, sampleTrack } from "./interp.js";
 import { createTouchControls, isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
-const WALK = 2.7; // tiles/second
-const RUN = 4.3;
+const WALK = 1.7; // tiles/second
+const RUN = 2.8;
 const TURN = 2.5; // radians/second
 const MOUSE = 0.0022;
 const RADIUS = 0.24;
@@ -316,42 +316,12 @@ addEventListener("orientationchange", () => setTimeout(() => renderer.resize(), 
 
 // -- joining -------------------------------------------------------------
 
-const elJoin = document.getElementById("join");
-const elJoinForm = document.getElementById("join-form");
-const elJoinName = document.getElementById("join-name");
-const NAME_KEY = "mazegame.name";
-
-function join(name) {
-  const clean = name.trim().slice(0, 24);
-  if (clean) localStorage.setItem(NAME_KEY, clean);
-  else localStorage.removeItem(NAME_KEY);
-  elJoin.classList.add("hidden");
-  connect(clean);
-
-  if (!isTouch) {
-    const lock = view.requestPointerLock();
-    if (lock && lock.catch) lock.catch(() => {}); // refused if unfocused; harmless
-  }
-}
-
-elJoinForm.addEventListener("submit", (e) => {
-  e.preventDefault();
-  join(elJoinName.value);
-});
-
+// No name prompt: the server hands out a name the moment you connect. The
+// `name` query parameter still overrides it for shared links and tooling.
 renderer.init().then(() => {
   if (!state.maze) setMaze((Math.random() * 2 ** 32) >>> 0);
   document.body.classList.toggle("touch", isTouch);
   showVersion(document.getElementById("version"));
   requestAnimationFrame(frame);
-
-  // A name in the URL is an explicit choice (shared links, kiosks): skip the
-  // card. Otherwise ask, pre-filled with whatever this browser used last.
-  if (params.has("name")) {
-    join(params.get("name"));
-  } else {
-    elJoinName.value = localStorage.getItem(NAME_KEY) || "";
-    elJoin.classList.remove("hidden");
-    elJoinName.focus();
-  }
+  connect(params.get("name") || "");
 });

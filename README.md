@@ -84,9 +84,13 @@ running service, so the unit is verified rather than assumed.
 | `shift` | run |
 | `esc` | release the mouse |
 
-Your name is asked once per browser and remembered in `localStorage`; leave the
-field empty for a generated one like `pinned-hopper`. `/?name=whoever` skips the
-card entirely, which is what shared links and kiosks want.
+There is nothing to fill in: you get a generated name like `pinned-hopper` the
+moment the page connects. `/?name=whoever` overrides it for shared links and
+tooling.
+
+Walking is `WALK` = 1.7 tiles/s, running `RUN` = 2.8. A perfect run from a
+spawn ~94 tiles out takes about 35 s sprinting, so a round comfortably fits
+inside the two-minute countdown even after a few wrong turns.
 
 Watcher page: `space` / `N` skips to the next player, `F` goes fullscreen.
 
