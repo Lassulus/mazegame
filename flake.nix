@@ -166,8 +166,11 @@
             testScript =
               let
                 # A real handshake, a real position update and a real snapshot
-                # back: the game is a websocket server, so booting and serving
-                # HTML proves only half of it.
+                # back, decoded: the game is a websocket server speaking a
+                # binary snapshot format, so booting and serving HTML proves
+                # only half of it. The watcher is what closes the loop — it is
+                # centred on the player, so the body it receives must be the
+                # position the player just sent.
                 wsProbe = pkgs.writers.writePython3 "mazegame-ws-probe" { } ''
                   import base64
                   import json
@@ -175,44 +178,70 @@
                   import socket
                   import struct
 
-                  sock = socket.create_connection(("127.0.0.1", 8080), timeout=10)
-                  key = base64.b64encode(os.urandom(16)).decode()
-                  sock.sendall(
-                      f"GET /ws/play?name=probe HTTP/1.1\r\nHost: localhost\r\n"
-                      f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode()
-                  )
-                  head = b""
-                  while b"\r\n\r\n" not in head:
-                      head += sock.recv(4096)
-                  assert b"101 Switching Protocols" in head, head
 
-                  body = json.dumps({"t": "pos", "x": 5.5, "y": 5.5, "a": 0.0}).encode()
-                  mask = os.urandom(4)
-                  sock.sendall(
-                      struct.pack("!BB", 0x81, 0x80 | len(body))
-                      + mask
-                      + bytes(b ^ mask[i % 4] for i, b in enumerate(body))
-                  )
+                  def connect(path):
+                      sock = socket.create_connection(("127.0.0.1", 8080), timeout=10)
+                      key = base64.b64encode(os.urandom(16)).decode()
+                      sock.sendall(
+                          f"GET {path} HTTP/1.1\r\nHost: localhost\r\n"
+                          f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                          f"Sec-WebSocket-Key: {key}\r\n"
+                          "Sec-WebSocket-Version: 13\r\n\r\n".encode()
+                      )
+                      head = b""
+                      while b"\r\n\r\n" not in head:
+                          head += sock.recv(4096)
+                      assert b"101 Switching Protocols" in head, head
+                      return sock
 
 
-                  def frame():
+                  def send(sock, payload):
+                      body = json.dumps(payload).encode()
+                      mask = os.urandom(4)
+                      sock.sendall(
+                          struct.pack("!BB", 0x81, 0x80 | len(body))
+                          + mask
+                          + bytes(b ^ mask[i % 4] for i, b in enumerate(body))
+                      )
+
+
+                  def frame(sock):
                       first = sock.recv(2)
+                      opcode = first[0] & 0x0F
                       size = first[1] & 0x7F
                       if size == 126:
                           size = struct.unpack("!H", sock.recv(2))[0]
                       data = b""
                       while len(data) < size:
                           data += sock.recv(size - len(data))
-                      return json.loads(data)
+                      return opcode, data
 
 
-                  kinds = set()
-                  for _ in range(8):
-                      kinds.add(frame()["t"])
-                      if {"welcome", "peers"} <= kinds:
+                  player = connect("/ws/play?name=probe")
+                  opcode, data = frame(player)
+                  assert opcode == 1 and json.loads(data)["t"] == "welcome", data
+                  send(player, {"t": "pos", "x": 5.5, "y": 5.5, "a": 0.0})
+
+                  watcher = connect("/ws/watch")
+                  names, seen = {}, None
+                  for _ in range(40):
+                      opcode, data = frame(watcher)
+                      if opcode == 1:
+                          message = json.loads(data)
+                          if message["t"] == "names":
+                              names.update({int(i): n for i, n in message["l"]})
+                          continue
+                      assert data[0] == 1, data[:4]  # snapshot frame
+                      bodies = struct.unpack_from("<H", data, 8)[0]
+                      if bodies:
+                          pid, x, y, _a, _f, _age = struct.unpack_from(
+                              "<IHHHBB", data, 10
+                          )
+                          seen = (pid, x / 1000, y / 1000)
                           break
-                  assert {"welcome", "peers"} <= kinds, kinds
+                  assert seen is not None, "watcher never received a body"
+                  assert abs(seen[1] - 5.5) < 0.01 and abs(seen[2] - 5.5) < 0.01, seen
+                  assert names.get(seen[0]) == "probe", (names, seen)
                   print("websocket ok")
                 '';
               in

@@ -5,7 +5,7 @@ import { WIN_DWELL, buildMaze, solid, spawnFor } from "./maze.js";
 import { Renderer, drawMinimap, retroPixel } from "./render.js";
 import { createSocket } from "./net.js";
 import { createTags } from "./tags.js";
-import { makeTrack, pushSample, sampleTrack } from "./interp.js";
+import { clockTime, makeClock, makeTrack, pushSample, sampleTrack } from "./interp.js";
 import { createTouchControls, isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
@@ -16,6 +16,10 @@ const MOUSE = 0.0022;
 const RADIUS = 0.24;
 const SEND_HZ = 20; // until the server says otherwise in its snapshots
 const WIN_DIST = 0.9;
+// A body may miss a few snapshots to interest-list churn and still be there;
+// much longer than that and it has genuinely walked out of range, so holding
+// on to it would leave a pawn standing in an empty corridor.
+const PEER_TTL = 3; // snapshots a body may go unmentioned before it is dropped
 
 const view = document.getElementById("view");
 const minimap = document.getElementById("minimap");
@@ -52,6 +56,7 @@ const state = {
   peers: new Map(), // player id -> { id, x, y, a, finished }
   endsAt: null, // performance.now() deadline for the world rollover
   sendHz: SEND_HZ, // position updates per second, paced by the server
+  clock: makeClock(), // maps the server's tick clock into local time
 };
 state.renderer = renderer;
 window.mazegame = state; // handy for the console and for smoke tests
@@ -116,6 +121,8 @@ function connect(name) {
             ? `${who} escaped again · ×${msg.runs}`
             : `${who} escaped · ${ordinal(msg.place)} · ${msg.secs}s`,
         );
+      } else if (msg.t === "names") {
+        for (const [id, name] of msg.l) state.names.set(id, name);
       } else if (msg.t === "watched") {
         elWatchers.textContent = msg.n;
         elWatched.classList.toggle("hidden", msg.n === 0);
@@ -129,28 +136,38 @@ function applyWorld(world) {
   state.endsAt = world.ends_in === null ? null : performance.now() + world.ends_in * 1000;
 }
 
-// The server only sends the neighbours in view, names included the first time
-// each one shows up, so there is no roster broadcast to fan out.
+// The server only sends the neighbours in view; names arrive once, in their
+// own message, the first time a body shows up.
 function applyPeers(msg) {
   elPlayers.textContent = msg.n;
-  // A crowded room snapshots at 10 Hz; sending 20 Hz of position into it just
-  // makes the server parse frames it will never forward.
-  if (msg.hz) state.sendHz = Math.min(SEND_HZ, msg.hz);
-  const now = performance.now();
-  const seen = new Set();
-  for (const [id, x, y, a, finished, name] of msg.l) {
-    if (name) state.names.set(id, name);
+  // Pace our own updates off the room's: a crowded room snapshots at 10 Hz,
+  // and sending far more than that is work the server throws away. Twice the
+  // snapshot rate, though, keeps each snapshot close to a fresh sample —
+  // sending at exactly the tick rate beats against it and makes everyone
+  // else's walk look uneven.
+  if (msg.hz) state.sendHz = Math.min(SEND_HZ, msg.hz * 2);
+  // Snapshots are laid out on the server's clock, not on their arrival time.
+  const now = clockTime(state.clock, msg.clock, performance.now());
+  for (const [id, x, y, a, finished, age] of msg.l) {
     if (id === state.id) continue; // that one is us
-    seen.add(id);
     let peer = state.peers.get(id);
     if (!peer) {
       peer = { id, track: makeTrack(x, y, a), x, y, a, finished: !!finished };
       state.peers.set(id, peer);
     }
     peer.finished = !!finished;
-    pushSample(peer.track, x, y, a, now);
+    peer.seen = now;
+    // `age` is how stale the body was when the tick sampled it, so the sample
+    // lands where it belongs on the timeline instead of on the tick boundary.
+    pushSample(peer.track, x, y, a, now - age);
   }
-  for (const id of [...state.peers.keys()]) if (!seen.has(id)) state.peers.delete(id);
+  // Interest lists churn at the edges: in a crowd a body drops out of the
+  // nearest twenty for a tick and comes straight back. Forgetting it on the
+  // first miss threw away its interpolation history and made pawns blink.
+  const ttl = (PEER_TTL * 1000) / (msg.hz || 10);
+  for (const [id, peer] of state.peers) {
+    if (now - peer.seen > ttl) state.peers.delete(id);
+  }
 }
 
 // Bodies are drawn where interpolation says they are right now, not where the

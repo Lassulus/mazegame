@@ -1,6 +1,40 @@
-// Tiny reconnecting JSON-over-WebSocket client.
+// Tiny reconnecting WebSocket client. Control traffic is JSON; position
+// snapshots arrive as binary, eleven bytes a body, and are decoded here so
+// the pages only ever see `{ t: "peers", … }`.
 
 const HEARTBEAT_MS = 3000; // server drops sockets that go quiet
+const PEERS_FRAME = 1;
+const POS_SCALE = 1000; // world units per unit of the u16 position field
+const ANGLE_SCALE = (Math.PI * 2) / 65536;
+const BODY = 12; // bytes: u32 id, u16 x, u16 y, u16 angle, u8 flags, u8 age
+const HEAD = 10; // bytes: u8 type, u8 hz, u16 players, u32 tick clock, u16 count
+const AGE_STEP = 2; // ms per unit of the age field
+
+// { t, hz, n, clock, l: [[id, x, y, angle, finished, age], …] }. Names are no
+// longer in here — they arrive once, in their own message — and every body
+// carries how stale it was when the snapshot went out, so playback can put it
+// where it actually was rather than where the tick happened to catch it.
+function decodePeers(buffer) {
+  const view = new DataView(buffer);
+  if (view.byteLength < HEAD || view.getUint8(0) !== PEERS_FRAME) return null;
+  const hz = view.getUint8(1);
+  const n = view.getUint16(2, true);
+  const clock = view.getUint32(4, true);
+  const count = view.getUint16(8, true);
+  const list = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const at = HEAD + i * BODY;
+    list[i] = [
+      view.getUint32(at, true),
+      view.getUint16(at + 4, true) / POS_SCALE,
+      view.getUint16(at + 6, true) / POS_SCALE,
+      view.getUint16(at + 8, true) * ANGLE_SCALE,
+      view.getUint8(at + 10) & 1,
+      view.getUint8(at + 11) * AGE_STEP,
+    ];
+  }
+  return { t: "peers", hz, n, clock, l: list };
+}
 
 export function createSocket(path, { onMessage, onOpen, onStatus } = {}) {
   const url = new URL(path, location.href);
@@ -17,6 +51,7 @@ export function createSocket(path, { onMessage, onOpen, onStatus } = {}) {
     if (closed) return;
     status("connecting…", "pending");
     socket = new WebSocket(url);
+    socket.binaryType = "arraybuffer";
     socket.onopen = () => {
       backoff = 400;
       status("live", "ok");
@@ -27,6 +62,11 @@ export function createSocket(path, { onMessage, onOpen, onStatus } = {}) {
       onOpen && onOpen();
     };
     socket.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        const msg = decodePeers(event.data);
+        if (msg) onMessage && onMessage(msg);
+        return;
+      }
       let msg;
       try {
         msg = JSON.parse(event.data);

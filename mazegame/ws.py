@@ -49,6 +49,11 @@ def text_frame(text: str) -> bytes:
     return build_frame(OP_TEXT, text.encode("utf-8"))
 
 
+def binary_frame(payload: bytes) -> bytes:
+    """Snapshots go out as binary: eleven bytes a body, no JSON to parse."""
+    return build_frame(OP_BIN, payload)
+
+
 class Framer:
     """Turns a byte stream into complete messages.
 

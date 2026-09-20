@@ -180,10 +180,16 @@ Everything here is measured with synthetic clients against one process:
   it is 16k calls a second at 800 players, the writes are atomic under the
   GIL, and a reader that catches a new x with an old y is off by one frame of
   walking for one tick.
+- **Binary snapshots.** A body is twelve bytes — `u32` id, `u16` x, `u16` y,
+  `u16` angle, flags, age — not forty-odd characters of JSON with the name
+  repeated every tick. Names go out once per viewer in a `names` message and
+  the server remembers who has been told (`Player.known`). At 200 players
+  that took a client from 7.0 KB/s to 3.1 KB/s, at 600 from 4.6 to 1.8, while
+  carrying 28 neighbours instead of 20.
 - **Interest management.** Sending every position to every player is
   quadratic: at 560 players that was a 10 KB frame fanned out 560 times, 20
   times a second — 114 MB/s. A bucket index bounds the candidate set and each
-  client gets the `PEER_LIMIT` (20) nearest bodies, names inline.
+  client gets the `PEER_LIMIT` (28) nearest bodies.
 - **Shared frames in a crowd.** Below `PEER_EXACT_MAX` (120) every client
   gets its own list centred on itself out of `BUCKET` (8 tile) cells. Above
   it, one frame is built per `CROWD_BUCKET` (4 tile) cell and the same bytes
@@ -192,23 +198,38 @@ Everything here is measured with synthetic clients against one process:
   shortlist it replaces — of a player's eight nearest neighbours it misses
   3.7 % against the shortlist's 29.5 %. Spectators are always built exactly
   around their target, which is what keeps a camera from losing its player.
-- **One encode per body.** A body serialises identically for every viewer, so
-  each is encoded once per tick (hand-rolled, with the name JSON-escaped once
-  at join) and frames are assembled by joining strings. This alone took 200
-  players from 4.8 Hz to 9.8 Hz.
+- **One pack per body.** A body packs identically for every viewer, so it is
+  packed once per tick and frames are assembled by joining bytes.
 - **Cadence that scales.** `snapshot_interval` gives a quiet room 20 Hz, 150+
   players 10 Hz and 500+ players 6.7 Hz, because at 800 a tick costs ~20 ms
   to build and ~40 ms to write. The rate rides along in every snapshot as
-  `hz` and clients pace their own position updates off it, so a crowded room
-  also stops paying for 20 Hz of inbound traffic it would never forward.
-- **Interpolation.** Snapshots arrive 7-20 times a second, frames are drawn
-  60 times a second. `interp.js` glides every remote body (and the spectator
-  camera) between the last two samples. Measured on the camera with 100
-  players: snapping moved in 13 of 149 frames with jumps up to 0.16 tiles;
-  interpolated moves in 145 of 149, biggest step 0.017.
+  `hz`; clients send their own position at twice it (capped at 20 Hz), which
+  keeps every snapshot close to a fresh sample without flooding the loop.
+- **Playback, not chasing.** Snapshots arrive 7-20 times a second, frames are
+  drawn 60 times a second. `interp.js` keeps the last few samples per body and
+  renders at `now - delay` — one and a bit snapshot intervals behind, learned
+  per body — between the two samples that straddle that instant. Two things
+  make the timeline honest: the server stamps each snapshot with its tick
+  clock (so arrival jitter is discarded) and each body with its `age` in
+  milliseconds (so a position reported 40 ms before the tick is placed 40 ms
+  back, not on the tick boundary).
+
+  Measured against a body walking a constant 1.5 tiles/s in a 150-player
+  room, per-frame speed as the client rendered it:
+
+  | | old glide | buffered playback |
+  | --- | --- | --- |
+  | 5th-95th percentile | 0.51-2.37 tiles/s | 1.35-1.54 |
+  | coefficient of variation | 0.39 | 0.10 |
+  | frames stalled | 31 % (worst run) | 0 % |
+- **Bodies persist across churn.** An interest list is the nearest 28, so in
+  a crowd a body drops out for a tick and comes straight back. Deleting it on
+  the first miss threw away its interpolation history and made pawns blink;
+  clients now keep one for three snapshots, which is long enough to bridge
+  churn and short enough that a body which really walked away does not linger
+  as a statue.
 - **No roster broadcast.** It was a 14 KB frame to everyone on every join —
-  8 MB of traffic per player arriving. Names ride along in the peer entries
-  instead, so a client learns a name exactly when it can see its owner.
+  8 MB of traffic per player arriving.
 - **Cheap ops endpoint.** `/api/state` answers with counters and tick timings
   (`build_ms`, `send_ms`, `frames`, `slow`, `dropped`); the per-player roster
   is behind `?full=1`, because serialising 800 players on every poll is real

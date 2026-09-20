@@ -4,4 +4,4 @@ Single source of truth for the version: pyproject.toml and flake.nix both read
 `__version__` from here.
 """
 
-__version__ = "1.10.1"
+__version__ = "1.11.0"

@@ -17,11 +17,25 @@ import json
 import math
 import random
 import secrets
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
 
-from .ws import text_frame
+from .ws import binary_frame, text_frame
+
+# Snapshot wire format. A body is eleven bytes — id, x, y, angle, flags —
+# instead of forty-odd characters of JSON, and names travel once per viewer
+# in a `names` message rather than on every tick. At 800 players that is the
+# difference between 4.6 KB/s and 1.4 KB/s per client.
+PEERS_FRAME = 1
+POS_SCALE = 1000  # world units per unit of the u16 position field
+TAU = 2 * math.pi
+ANGLE_SCALE = 65536 / TAU
+KNOWN_CAP = 1024  # names remembered per viewer before the slate is wiped
+_PEERS_HEAD = struct.Struct("<BBHI")  # type, hz, players in the room, tick clock
+AGE_STEP = 2  # ms per unit of the u8 age field, so 0-510 ms fits
+_BODY = struct.Struct("<IHHHBB")  # id, x, y, angle, flags, age
 
 IDLE_SWITCH = 2.0  # seconds of stillness before a watcher moves on
 ROUND_GRACE = 120.0  # seconds between the first escape and the next maze
@@ -30,7 +44,7 @@ MOVE_EPS = 0.015  # world units
 TURN_EPS = 0.015  # radians
 BUCKET = 8  # tiles per interest bucket edge while the room is small
 CROWD_BUCKET = 4  # tighter buckets once frames are shared, so the list stays local
-PEER_LIMIT = 20  # neighbours sent per client
+PEER_LIMIT = 28  # neighbours sent per client; a body is 12 bytes, so this is cheap
 PEER_INTERVAL = 0.05  # seconds between position snapshots in a quiet room
 PEER_BUSY = 150  # above this many players, halve the snapshot rate
 PEER_CROWD = 500  # above this, a third of it: the tick has 1200 sockets to write
@@ -90,10 +104,10 @@ class Player:
     place: int | None = None
     escapes: int = 0
     last_escape: float = 0.0
-
-    def __post_init__(self) -> None:
-        # Names never change, so escape once instead of on every snapshot.
-        self.tag = json.dumps(self.name)
+    moved_at: float = field(default_factory=time.monotonic)  # when x/y/a last arrived
+    # Names this viewer has already been told about, so a snapshot can be
+    # pure numbers.
+    known: set[int] = field(default_factory=set)
 
     def idle_for(self, now: float) -> float:
         return now - self.last_move
@@ -102,9 +116,10 @@ class Player:
 @dataclass
 class Watcher:
     wid: int
-    conn: object  # WebSocket
+    conn: object  # Conn
     target: int | None = None
     since: float = field(default_factory=time.monotonic)  # last switch
+    known: set[int] = field(default_factory=set)
 
 
 class Hub:
@@ -240,6 +255,11 @@ class Hub:
             or abs(_wrap(a - player.a)) > TURN_EPS
         )
         player.x, player.y, player.a, player.placed = x, y, a, True
+        # When this position was true. Snapshots go out on a fixed cadence but
+        # a body's last report can be anywhere inside the interval, and that
+        # wobble is what made other players' walking look uneven: the client
+        # needs the age to place the sample on its own timeline.
+        player.moved_at = now
         if moved:
             player.last_move = now
         return moved
@@ -296,19 +316,18 @@ class Hub:
     def broadcast_peers(self) -> None:
         """Positions, but only the neighbours each client can actually see.
 
-        Sending every player to every player is quadratic: 500 players meant a
-        10 KB frame fanned out 500 times, 20 times a second. A bucket index
-        keeps the candidate set local.
+        Sending every position to every player is quadratic: at 560 players
+        that was a 10 KB frame fanned out 560 times, 20 times a second. A
+        bucket index bounds the candidate set, each client gets the
+        `PEER_LIMIT` nearest bodies, and the frame is **binary**: eleven bytes
+        a body instead of forty-odd characters of JSON, with names sent once
+        per viewer instead of on every tick.
 
         Two regimes. While the room is small every client gets its own list,
         centred on itself, out of a wide (`BUCKET`) neighbourhood — exact, and
         cheap because there are few clients. Past `PEER_EXACT_MAX` the frame is
         built once per `CROWD_BUCKET` cell and the same bytes go to everyone
-        standing in it: 800 players cost ~160 frames instead of 800, and the
-        tighter cell keeps that shared list genuinely local. Measured on 800
-        scattered players, the shared list misses 3.7 % of a player's eight
-        nearest neighbours against 29.5 % for the per-bucket shortlist it
-        replaces, at a third of the CPU.
+        standing in it: 800 players cost ~160 frames instead of 800.
 
         Watchers always get an exact list centred on their target, and never
         skipping it: the camera needs the position of the very player it is
@@ -333,13 +352,13 @@ class Hub:
             # copy, so a player moving mid-tick cannot tear a frame and the
             # hot loops index instead of chasing attributes.
             bodies = [
-                (p.x, p.y, p.pid, p.a, 1 if p.finished_at is not None else 0, p.tag)
+                (p.x, p.y, p.pid, p.a, 1 if p.finished_at is not None else 0, p.name, p.moved_at)
                 for p in self.players.values()
                 if p.placed
             ]
-            targets = [(p.conn, p.x, p.y, p.pid) for p in self.players.values() if p.placed]
+            viewers = [(p, p.x, p.y, p.pid) for p in self.players.values() if p.placed]
             idle = [p.conn for p in self.players.values() if not p.placed]
-            watching = [(w.conn, w.target) for w in self.watchers.values()]
+            watching = [(w, w.target) for w in self.watchers.values()]
 
         crowded = count > PEER_EXACT_MAX
         bucket = CROWD_BUCKET if crowded else BUCKET
@@ -348,25 +367,38 @@ class Hub:
         for b in bodies:
             buckets.setdefault((int(b[0] // bucket), int(b[1] // bucket)), []).append(b)
 
-        # Clients pace their own updates off this: no point sending 20 Hz of
-        # position into a room that only snapshots at 10.
-        prefix = f'{{"t":"peers","n":{count},"hz":{round(1 / interval)},"l":['
-        empty = text_frame(prefix + "]}")
-        # A body serialises to the same JSON no matter who is looking at it, so
-        # encode each one once per tick and assemble frames by joining strings.
-        # json.dumps per client is what caps the tick rate once a couple of
-        # hundred people are connected. Names ride along, so clients never need
-        # a roster broadcast.
-        entry: dict[int, str] = {}
+        # The tick clock rides along so clients can lay snapshots on an even
+        # timeline instead of on their own arrival times, which jitter.
+        head = _PEERS_HEAD.pack(
+            PEERS_FRAME,
+            min(255, round(1 / interval)),
+            min(65535, count),
+            int(now * 1000) & 0xFFFFFFFF,
+        )
+        empty = binary_frame(head + b"\x00\x00")
+        # A body packs identically for every viewer, so pack each one once per
+        # tick and assemble frames by joining bytes.
+        packed: dict[int, bytes] = {}
 
-        def encode(q: tuple) -> str:
-            hit = entry.get(q[2])
+        def pack(q: tuple) -> bytes:
+            hit = packed.get(q[2])
             if hit is None:
-                # Hand-rolled instead of json.dumps: same bytes without the
-                # list allocation, and the name was escaped once at join.
-                hit = f"[{q[2]},{round(q[0], 3)},{round(q[1], 3)},{round(q[3], 3)},{q[4]},{q[5]}]"
-                entry[q[2]] = hit
+                hit = _BODY.pack(
+                    q[2] & 0xFFFFFFFF,
+                    min(65535, max(0, int(q[0] * POS_SCALE))),
+                    min(65535, max(0, int(q[1] * POS_SCALE))),
+                    int((q[3] % TAU) * ANGLE_SCALE) & 0xFFFF,
+                    q[4],
+                    min(255, max(0, int((now - q[6]) * 1000 / AGE_STEP))),
+                )
+                packed[q[2]] = hit
             return hit
+
+        def build(near: list[tuple]) -> tuple[bytes, tuple[int, ...]]:
+            frame = binary_frame(
+                head + len(near).to_bytes(2, "little") + b"".join([pack(q) for q in near])
+            )
+            return frame, tuple(q[2] for q in near)
 
         def pool_at(bx: int, by: int) -> list[tuple]:
             pool: list[tuple] = []
@@ -375,18 +407,38 @@ class Hub:
                     pool.extend(buckets.get((bx + ox, by + oy), ()))
             return pool
 
-        def frame_around(x: float, y: float, skip: int | None) -> bytes:
+        def around(x: float, y: float, skip: int | None) -> tuple[bytes, tuple[int, ...]]:
             pool = pool_at(int(x // bucket), int(y // bucket))
-            near = heapq.nsmallest(
-                PEER_LIMIT,
-                (q for q in pool if q[2] != skip),
-                key=lambda q: (q[0] - x) ** 2 + (q[1] - y) ** 2,
+            return build(
+                heapq.nsmallest(
+                    PEER_LIMIT,
+                    (q for q in pool if q[2] != skip),
+                    key=lambda q: (q[0] - x) ** 2 + (q[1] - y) ** 2,
+                )
             )
-            return text_frame(prefix + ",".join([encode(q) for q in near]) + "]}")
 
         sends: list[tuple] = []
+        named: list[tuple] = []
+
+        def queue(viewer, frame: bytes, ids: tuple[int, ...]) -> None:
+            """Send the frame, and any names this viewer has not been told."""
+            sends.append((viewer.conn, frame))
+            known = viewer.known
+            fresh = [i for i in ids if i not in known]
+            if fresh:
+                if len(known) > KNOWN_CAP:
+                    known.clear()  # a long session in a busy world; start over
+                known.update(fresh)
+                named.append((
+                    viewer.conn,
+                    text_frame(json.dumps({
+                        "t": "names",
+                        "l": [[i, at[i][5]] for i in fresh if i in at],
+                    })),
+                ))
+
         if crowded:
-            shared: dict[tuple[int, int], bytes] = {}
+            shared: dict[tuple[int, int], tuple[bytes, tuple[int, ...]]] = {}
             for cell in buckets:
                 pool = pool_at(*cell)
                 if len(pool) > PEER_LIMIT:
@@ -395,19 +447,22 @@ class Hub:
                     pool = heapq.nsmallest(
                         PEER_LIMIT, pool, key=lambda q: (q[0] - cx) ** 2 + (q[1] - cy) ** 2
                     )
-                shared[cell] = text_frame(prefix + ",".join([encode(q) for q in pool]) + "]}")
-            for conn, x, y, _pid in targets:
-                sends.append((conn, shared[(int(x // bucket), int(y // bucket))]))
+                shared[cell] = build(pool)
+            for player, x, y, _pid in viewers:
+                queue(player, *shared[(int(x // bucket), int(y // bucket))])
         else:
-            sends = [(conn, frame_around(x, y, pid)) for conn, x, y, pid in targets]
+            for player, x, y, pid in viewers:
+                queue(player, *around(x, y, pid))
         sends += [(conn, empty) for conn in idle]
-        for conn, target in watching:
+        for watcher, target in watching:
             body = at.get(target) if target else None
             if body is None:
                 continue
-            sends.append((conn, frame_around(body[0], body[1], None)))
+            queue(watcher, *around(body[0], body[1], None))
 
         built = time.monotonic()
+        for conn, frame in named:
+            conn.send_bytes(frame)
         for conn, frame in sends:
             conn.send_bytes(frame)
         done = time.monotonic()

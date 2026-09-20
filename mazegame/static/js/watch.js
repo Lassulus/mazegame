@@ -3,13 +3,14 @@
 
 import { buildMaze } from "./maze.js";
 import { Renderer, retroPixel } from "./render.js";
-import { makeTrack, pushSample, sampleTrack, wrapAngle } from "./interp.js";
+import { clockTime, makeClock, makeTrack, pushSample, sampleTrack, wrapAngle } from "./interp.js";
 import { createSocket } from "./net.js";
 import { createTags } from "./tags.js";
 import { isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
 const IDLE_LIMIT = 2000; // must match hub.IDLE_SWITCH
+const PEER_TTL = 3; // snapshots a body may go unmentioned before it is dropped
 
 const view = document.getElementById("view");
 const elName = document.getElementById("target");
@@ -34,6 +35,7 @@ const state = {
   names: new Map(),
   peers: new Map(),
   endsAt: null,
+  clock: makeClock(), // maps the server's tick clock into local time
 };
 window.mazecam = state; // handy for the console and for smoke tests
 
@@ -97,6 +99,8 @@ const socket = createSocket("/ws/watch", {
           : `${msg.name.toUpperCase()} ESCAPED`,
         "win",
       );
+    } else if (msg.t === "names") {
+      for (const [id, name] of msg.l) state.names.set(id, name);
     } else if (msg.t === "idle_pool") {
       state.target = null;
       state.maze = null;
@@ -117,10 +121,8 @@ const socket = createSocket("/ws/watch", {
 function applyPeers(msg) {
   state.players = msg.n;
   elPlayers.textContent = msg.n;
-  const now = performance.now();
-  const seen = new Set();
-  for (const [id, x, y, a, finished, name] of msg.l) {
-    if (name) state.names.set(id, name);
+  const now = clockTime(state.clock, msg.clock, performance.now());
+  for (const [id, x, y, a, finished, age] of msg.l) {
     if (state.target && id === state.target.id) {
       const moved =
         Math.abs(x - state.lastPos.x) > 0.015 ||
@@ -128,19 +130,25 @@ function applyPeers(msg) {
         Math.abs(wrapAngle(a - state.lastPos.a)) > 0.015;
       if (moved) state.lastMove = now;
       state.lastPos = { x, y, a };
-      pushSample(state.camTrack, x, y, a, now);
+      pushSample(state.camTrack, x, y, a, now - age);
       continue;
     }
-    seen.add(id);
     let peer = state.peers.get(id);
     if (!peer) {
       peer = { id, track: makeTrack(x, y, a), x, y, a, finished: !!finished };
       state.peers.set(id, peer);
     }
     peer.finished = !!finished;
-    pushSample(peer.track, x, y, a, now);
+    peer.seen = now;
+    pushSample(peer.track, x, y, a, now - age);
   }
-  for (const id of [...state.peers.keys()]) if (!seen.has(id)) state.peers.delete(id);
+  // A body that drops out of the nearest twenty for one tick is still there:
+  // forgetting it immediately threw away its interpolation history. Much
+  // longer than a few snapshots, though, and it really has walked away.
+  const ttl = (PEER_TTL * 1000) / (msg.hz || 10);
+  for (const [id, peer] of state.peers) {
+    if (now - peer.seen > ttl) state.peers.delete(id);
+  }
 }
 
 function livePeers(now) {
