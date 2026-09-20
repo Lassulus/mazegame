@@ -8,8 +8,8 @@ import posixpath
 import socket
 import threading
 import time
+import traceback
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -214,8 +214,14 @@ def serve(
     stop = threading.Event()
 
     def ticker() -> None:
+        # This thread owns peer snapshots, watcher switching and the round
+        # rollover. If it ever dies the world silently freezes for everyone,
+        # so no single bad connection may take it down.
         while not stop.wait(1.0 / TICK_HZ):
-            hub.tick()
+            try:
+                hub.tick()
+            except Exception:
+                traceback.print_exc()
 
     thread = threading.Thread(target=ticker, name="hub-tick", daemon=True)
     thread.start()

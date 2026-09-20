@@ -119,7 +119,10 @@ class WebSocket:
                 self._wfile.write(header + payload)
                 self._wfile.flush()
                 return True
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError: the reader thread already tore the socket down
+                # ("I/O operation on closed file"). Either way the peer is gone
+                # and a broadcast must not blow up on its way round the room.
                 self.closed = True
                 return False
 
