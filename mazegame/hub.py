@@ -1,4 +1,8 @@
-"""Shared game state: who is playing, who is watching whom.
+"""Shared game state: one maze for everyone, plus the spectator camera.
+
+Every player walks the same seeded maze and sees the others as they move. The
+first player to touch the NixOS logo starts a countdown; when it expires the
+whole world rolls over to a fresh maze.
 
 The watcher rule: a watcher follows one player; when that player has not moved
 for `IDLE_SWITCH` seconds, the watcher is handed to the next player in join
@@ -17,6 +21,7 @@ import time
 from dataclasses import dataclass, field
 
 IDLE_SWITCH = 2.0  # seconds of stillness before a watcher moves on
+ROUND_GRACE = 120.0  # seconds between the first escape and the next maze
 MOVE_EPS = 0.015  # world units
 TURN_EPS = 0.015  # radians
 
@@ -49,28 +54,17 @@ class Player:
     pid: int
     name: str
     conn: object  # WebSocket
-    seed: int = field(default_factory=new_seed)
     x: float = 0.0
     y: float = 0.0
     a: float = 0.0
     placed: bool = False
-    escapes: int = 0
     joined: float = field(default_factory=time.monotonic)
     last_move: float = field(default_factory=time.monotonic)
+    finished_at: float | None = None
+    place: int | None = None
 
     def idle_for(self, now: float) -> float:
         return now - self.last_move
-
-    def snapshot(self) -> dict:
-        return {
-            "id": self.pid,
-            "name": self.name,
-            "seed": self.seed,
-            "x": round(self.x, 4),
-            "y": round(self.y, 4),
-            "a": round(self.a, 4),
-            "escapes": self.escapes,
-        }
 
 
 @dataclass
@@ -82,12 +76,89 @@ class Watcher:
 
 
 class Hub:
-    def __init__(self, idle_switch: float = IDLE_SWITCH) -> None:
+    def __init__(self, idle_switch: float = IDLE_SWITCH, grace: float = ROUND_GRACE) -> None:
         self.idle_switch = idle_switch
+        self.grace = grace
         self._lock = threading.RLock()
         self._ids = itertools.count(1)
         self.players: dict[int, Player] = {}  # insertion order == join order
         self.watchers: dict[int, Watcher] = {}
+        self.seed = new_seed()
+        self.round_started = time.monotonic()
+        self.deadline: float | None = None  # set by the first escape
+
+    # -- the world ---------------------------------------------------------
+
+    def roster(self) -> list[dict]:
+        with self._lock:
+            return [{"id": p.pid, "name": p.name} for p in self.players.values()]
+
+    def world(self) -> dict:
+        """Everything a joining client needs to draw the current round."""
+        with self._lock:
+            return {
+                "seed": self.seed,
+                "ends_in": self._ends_in(),
+                "grace": self.grace,
+                "finishers": self._finishers(),
+            }
+
+    def _ends_in(self) -> float | None:
+        if self.deadline is None:
+            return None
+        return max(0.0, round(self.deadline - time.monotonic(), 2))
+
+    def _finishers(self) -> list[dict]:
+        done = sorted(
+            (p for p in self.players.values() if p.finished_at is not None),
+            key=lambda p: p.finished_at,
+        )
+        return [
+            {
+                "name": p.name,
+                "place": p.place,
+                "secs": round(p.finished_at - self.round_started, 1),
+            }
+            for p in done
+        ]
+
+    def record_finish(self, player: Player) -> None:
+        """A player touched the logo. The first one starts the countdown."""
+        with self._lock:
+            if player.finished_at is not None:
+                return  # already home; standing in the exit changes nothing
+            now = time.monotonic()
+            player.finished_at = now
+            player.place = 1 + sum(
+                1 for p in self.players.values() if p is not player and p.finished_at is not None
+            )
+            first = self.deadline is None
+            if first:
+                self.deadline = now + self.grace
+            frame = json.dumps({
+                "t": "finish",
+                "id": player.pid,
+                "name": player.name,
+                "place": player.place,
+                "secs": round(now - self.round_started, 1),
+                "first": first,
+                "ends_in": self._ends_in(),
+            })
+        self._broadcast(frame)
+
+    def new_round(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            self.seed = new_seed()
+            self.round_started = now
+            self.deadline = None
+            for player in self.players.values():
+                player.finished_at = None
+                player.place = None
+                player.placed = False
+                player.last_move = now
+            frame = json.dumps({"t": "world", "seed": self.seed})
+        self._broadcast(frame)
 
     # -- players -----------------------------------------------------------
 
@@ -121,29 +192,7 @@ class Hub:
             player.x, player.y, player.a, player.placed = x, y, a, True
             if moved:
                 player.last_move = now
-            followers = [w for w in self.watchers.values() if w.target == player.pid]
-        if followers:
-            frame = json.dumps(
-                {"t": "pos", "x": round(x, 4), "y": round(y, 4), "a": round(a, 4),
-                 "m": 1 if moved else 0}
-            )
-            for watcher in followers:
-                watcher.conn.send(frame)
         return moved
-
-    def player_escaped(self, player: Player) -> int:
-        """Give the player a fresh maze; tell their watchers about it."""
-        with self._lock:
-            player.escapes += 1
-            player.seed = new_seed()
-            player.placed = False
-            player.last_move = time.monotonic()
-            seed = player.seed
-            followers = [w for w in self.watchers.values() if w.target == player.pid]
-        frame = json.dumps({"t": "escaped", "seed": seed, "escapes": player.escapes})
-        for watcher in followers:
-            watcher.conn.send(frame)
-        return seed
 
     # -- watchers ----------------------------------------------------------
 
@@ -165,9 +214,16 @@ class Hub:
         """Viewer-requested switch to the next player."""
         self._retarget(watcher, reason="skip")
 
+    # -- the clock ---------------------------------------------------------
+
     def tick(self) -> None:
-        """Called by the hub thread; rotates watchers off idle players."""
+        """Hub thread: rolls the world over, rotates watchers, pushes peers."""
         now = time.monotonic()
+        with self._lock:
+            rollover = self.deadline is not None and now >= self.deadline
+        if rollover:
+            self.new_round()
+
         with self._lock:
             due = []
             for watcher in self.watchers.values():
@@ -184,6 +240,26 @@ class Hub:
                     due.append((watcher, "idle"))
         for watcher, reason in due:
             self._retarget(watcher, reason=reason)
+
+        self.broadcast_peers()
+
+    def broadcast_peers(self) -> None:
+        """One positional snapshot for everyone; clients filter themselves out."""
+        with self._lock:
+            if not self.players and not self.watchers:
+                return
+            frame = json.dumps({
+                "t": "peers",
+                "l": [
+                    [p.pid, round(p.x, 3), round(p.y, 3), round(p.a, 3),
+                     1 if p.finished_at is not None else 0]
+                    for p in self.players.values()
+                    if p.placed
+                ],
+            })
+        self._broadcast(frame)
+
+    # -- plumbing ----------------------------------------------------------
 
     def _retarget(self, watcher: Watcher, reason: str, randomize: bool = False) -> None:
         now = time.monotonic()
@@ -204,8 +280,13 @@ class Hub:
                     "t": "watch",
                     "reason": reason,
                     "players": len(order),
-                    **pick.snapshot(),
+                    "id": pick.pid,
+                    "name": pick.name,
                     "placed": pick.placed,
+                    "x": round(pick.x, 4),
+                    "y": round(pick.y, 4),
+                    "a": round(pick.a, 4),
+                    **self.world(),
                 }
         watcher.conn.send(json.dumps(payload))
         self._notify_watched(previous, watcher.target)
@@ -224,14 +305,20 @@ class Hub:
         active = [p for p in others if p.idle_for(now) <= self.idle_switch]
         return (active or others)[0]
 
-    # -- misc --------------------------------------------------------------
+    def _broadcast(self, frame: str) -> None:
+        with self._lock:
+            conns = [p.conn for p in self.players.values()]
+            conns += [w.conn for w in self.watchers.values()]
+        for conn in conns:
+            conn.send(frame)
 
     def _broadcast_roster(self) -> None:
         with self._lock:
-            frame = json.dumps({"t": "roster", "players": len(self.players)})
-            conns = [w.conn for w in self.watchers.values()]
-        for conn in conns:
-            conn.send(frame)
+            frame = json.dumps({
+                "t": "roster",
+                "players": self.roster(),
+            })
+        self._broadcast(frame)
 
     def _notify_watched(self, *pids: int | None) -> None:
         """Let players know how many cameras are pointed at them."""
@@ -250,8 +337,22 @@ class Hub:
         now = time.monotonic()
         with self._lock:
             return {
+                "world": {
+                    "seed": self.seed,
+                    "age": round(now - self.round_started, 1),
+                    "ends_in": self._ends_in(),
+                    "finishers": self._finishers(),
+                },
                 "players": [
-                    {**p.snapshot(), "idle": round(p.idle_for(now), 2)}
+                    {
+                        "id": p.pid,
+                        "name": p.name,
+                        "x": round(p.x, 4),
+                        "y": round(p.y, 4),
+                        "a": round(p.a, 4),
+                        "idle": round(p.idle_for(now), 2),
+                        "place": p.place,
+                    }
                     for p in self.players.values()
                 ],
                 "watchers": [

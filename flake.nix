@@ -65,6 +65,14 @@
               default = 8080;
               description = "TCP port to listen on.";
             };
+            roundGrace = lib.mkOption {
+              type = lib.types.ints.positive;
+              default = 120;
+              description = ''
+                Seconds between the first player reaching the exit and the
+                whole world rolling over to a fresh maze.
+              '';
+            };
             openFirewall = lib.mkOption {
               type = lib.types.bool;
               default = false;
@@ -78,7 +86,13 @@
               wantedBy = [ "multi-user.target" ];
               after = [ "network.target" ];
               serviceConfig = {
-                ExecStart = "${lib.getExe cfg.package} --host ${cfg.host} --port ${toString cfg.port} --quiet";
+                ExecStart = lib.concatStringsSep " " [
+                  (lib.getExe cfg.package)
+                  "--host ${cfg.host}"
+                  "--port ${toString cfg.port}"
+                  "--grace ${toString cfg.roundGrace}"
+                  "--quiet"
+                ];
                 Restart = "on-failure";
                 DynamicUser = true;
                 NoNewPrivileges = true;

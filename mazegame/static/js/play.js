@@ -1,8 +1,10 @@
-// Player view: walk a seeded maze, find the NixOS logo, get a new maze.
+// Player view: everyone walks the same maze, sees each other, and races the
+// countdown that starts when the first player reaches the NixOS logo.
 
 import { WIN_DWELL, buildMaze, solid } from "./maze.js";
 import { Renderer, drawMinimap, retroPixel } from "./render.js";
 import { createSocket } from "./net.js";
+import { createTags } from "./tags.js";
 import { createTouchControls, isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
@@ -17,7 +19,10 @@ const WIN_DIST = 0.9;
 const view = document.getElementById("view");
 const minimap = document.getElementById("minimap");
 const elTime = document.getElementById("time");
-const elEscapes = document.getElementById("escapes");
+const elRound = document.getElementById("round");
+const elPlayers = document.getElementById("players");
+const elEvents = document.getElementById("events");
+const elLabels = document.getElementById("labels");
 const elWatched = document.getElementById("watched");
 const elWatchers = document.getElementById("watchers");
 const elStatus = document.getElementById("status");
@@ -35,15 +40,23 @@ const pinnedSeed = params.has("seed") ? Number(params.get("seed")) >>> 0 : null;
 const state = {
   maze: null,
   cam: { x: 1.5, y: 1.5, a: 0 },
-  won: false,
+  won: false, // reached the logo this round
   startedAt: performance.now(),
-  escapes: 0,
+  id: null,
+  names: new Map(), // player id -> name
+  peers: new Map(), // player id -> { id, x, y, a, finished }
+  endsAt: null, // performance.now() deadline for the world rollover
 };
 window.mazegame = state; // handy for the console and for smoke tests
 
 function setMaze(seed) {
   state.maze = buildMaze(pinnedSeed ?? seed >>> 0);
-  state.cam = { ...state.maze.start };
+  // Everyone starts on the same tile, jittered so pawns do not stack.
+  state.cam = {
+    x: state.maze.start.x + (Math.random() - 0.5) * 0.5,
+    y: state.maze.start.y + (Math.random() - 0.5) * 0.5,
+    a: state.maze.start.a,
+  };
   state.startedAt = performance.now();
   state.won = false;
   visited.clear();
@@ -78,17 +91,67 @@ function connect(name) {
     },
     onMessage(msg) {
       if (msg.t === "welcome") {
+        state.id = msg.id;
         elName.textContent = msg.name;
         document.title = `${msg.name} · NixOS Maze`;
+        applyRoster(msg.roster);
+        applyWorld(msg);
+        for (const f of msg.finishers) note(`${f.name} escaped · ${ordinal(f.place)}`);
+      } else if (msg.t === "world") {
         setMaze(msg.seed);
-      } else if (msg.t === "seed") {
-        respawn(msg.seed);
+        state.endsAt = null;
+        note("new maze");
+      } else if (msg.t === "roster") {
+        applyRoster(msg.players);
+      } else if (msg.t === "peers") {
+        applyPeers(msg.l);
+      } else if (msg.t === "finish") {
+        state.endsAt = performance.now() + msg.ends_in * 1000;
+        const who = msg.id === state.id ? "you" : msg.name;
+        note(`${who} escaped · ${ordinal(msg.place)} · ${msg.secs}s`);
       } else if (msg.t === "watched") {
         elWatchers.textContent = msg.n;
         elWatched.classList.toggle("hidden", msg.n === 0);
       }
     },
   });
+}
+
+function applyWorld(world) {
+  setMaze(world.seed);
+  state.endsAt = world.ends_in === null ? null : performance.now() + world.ends_in * 1000;
+}
+
+function applyRoster(list) {
+  state.names = new Map(list.map((p) => [p.id, p.name]));
+  elPlayers.textContent = list.length;
+  for (const id of [...state.peers.keys()]) {
+    if (!state.names.has(id)) state.peers.delete(id);
+  }
+}
+
+function applyPeers(list) {
+  const seen = new Set();
+  for (const [id, x, y, a, finished] of list) {
+    if (id === state.id) continue; // that one is us
+    seen.add(id);
+    state.peers.set(id, { id, x, y, a, finished: !!finished });
+  }
+  for (const id of [...state.peers.keys()]) if (!seen.has(id)) state.peers.delete(id);
+}
+
+function ordinal(place) {
+  const suffix = ["th", "st", "nd", "rd"][place % 10 > 3 || (place % 100) - place % 10 === 10 ? 0 : place % 10];
+  return `${place}${suffix}`;
+}
+
+function note(text) {
+  const line = document.createElement("div");
+  line.className = "event";
+  line.textContent = text;
+  elEvents.prepend(line);
+  while (elEvents.children.length > 4) elEvents.lastChild.remove();
+  setTimeout(() => line.remove(), 9000);
 }
 
 let lastSent = 0;
@@ -193,25 +256,22 @@ function win() {
   if (state.won) return;
   state.won = true;
   state.wonAt = performance.now();
-  state.escapes += 1;
-  elEscapes.textContent = state.escapes;
   const secs = (state.wonAt - state.startedAt) / 1000;
   showOverlay(
-    `<strong>ESCAPED</strong><br>${secs.toFixed(1)}s · ${state.maze.length} tiles of corridor<br><small>next maze…</small>`,
+    `<strong>ESCAPED</strong><br>${secs.toFixed(1)}s · ${state.maze.length} tiles of corridor` +
+      `<br><small>keep wandering — the maze changes when the countdown ends</small>`,
     "won",
   );
-  // Offline fallback: no server means no seed handout, so pick our own.
-  if (!socket || !socket.send({ t: "escaped" })) respawn((Math.random() * 2 ** 32) >>> 0);
+  setTimeout(hideOverlay, WIN_DWELL);
+  socket && socket.send({ t: "escaped" });
 }
 
-// Let the escape card breathe, and swap mazes exactly when watchers do.
-function respawn(seed) {
-  const wait = Math.max(0, WIN_DWELL - (performance.now() - state.wonAt));
-  setTimeout(() => {
-    setMaze(seed);
-    hideOverlay();
-  }, wait);
+function clock(secs) {
+  const whole = Math.max(0, Math.floor(secs));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
+
+const drawTags = createTags(elLabels);
 
 // -- main loop -----------------------------------------------------------
 
@@ -221,13 +281,13 @@ function frame(now) {
   last = now;
   step(dt);
   if (state.maze) {
-    renderer.draw(state.maze, state.cam);
-    drawMinimap(minimap, state.maze, state.cam, { visited, scale: 6 });
+    const peers = [...state.peers.values()];
+    const labels = renderer.draw(state.maze, state.cam, peers) || [];
+    drawTags(labels, state.names, view.clientWidth / renderer.w || 1);
+    drawMinimap(minimap, state.maze, state.cam, { visited, scale: 4, peers });
     pushPosition(now);
-    const secs = state.won ? 0 : (now - state.startedAt) / 1000;
-    if (!state.won) {
-      elTime.textContent = `${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, "0")}`;
-    }
+    elTime.textContent = clock((now - state.startedAt) / 1000);
+    elRound.textContent = state.endsAt === null ? "open" : clock((state.endsAt - now) / 1000);
   }
   requestAnimationFrame(frame);
 }

@@ -7,6 +7,21 @@ import { LEVELS, loadTextures } from "./textures.js";
 const FOG_DIST = 14; // tiles until full darkness
 const MAX_STEPS = 128;
 const MIN_PLANE = 0.75; // ~74 degrees horizontal, the narrowest we allow
+const PAWN_HEIGHT = 0.72; // world units, a bit shorter than a wall
+const FINISHED_COLOR = [126, 186, 228]; // NixOS blue for players who escaped
+
+// Stable per-player hue: golden-angle spacing keeps neighbours distinct.
+export function playerColor(id) {
+  const h = ((id * 137.508) % 360) / 360;
+  const s = 0.62;
+  const l = 0.6;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => {
+    const k = (n + h * 12) % 12;
+    return 255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)));
+  };
+  return [f(0), f(8), f(4)];
+}
 
 // Phones have few CSS pixels to spare; keep the chunky look without turning
 // the view into confetti.
@@ -42,11 +57,12 @@ export class Renderer {
     this.canvas.height = h;
     this.image = this.ctx.createImageData(w, h);
     this.px = new Uint32Array(this.image.data.buffer);
+    this.zbuf = new Float32Array(w);
     this.ctx.imageSmoothingEnabled = false;
   }
 
-  draw(maze, cam) {
-    if (!this.tex || !this.w) return;
+  draw(maze, cam, peers = []) {
+    if (!this.tex || !this.w) return [];
     const { w, h, px } = this;
     // Vertical FOV is fixed on wide screens; on a portrait phone that would
     // leave a peephole, so the horizontal FOV gets a floor instead.
@@ -110,9 +126,13 @@ export class Renderer {
         tile = tileAt(maze, mapX, mapY);
         if (tile !== EMPTY) break;
       }
-      if (tile === EMPTY) continue;
+      if (tile === EMPTY) {
+        this.zbuf[x] = 1e9;
+        continue;
+      }
 
       const perp = Math.max(0.0001, side === 0 ? sideX - ddx : sideY - ddy);
+      this.zbuf[x] = perp;
       const tex = tile === EXIT ? exitTex : wallTex;
 
       let wallX = side === 0 ? cam.y + perp * rdy : cam.x + perp * rdx;
@@ -141,7 +161,9 @@ export class Renderer {
       }
     }
 
+    const labels = this.#drawPeers(cam, peers, dirX, dirY, planeX, planeY, lineScale, half);
     this.ctx.putImageData(this.image, 0, 0);
+    return labels;
   }
 
   #drawFloorCeiling(maze, cam, dirX, dirY, planeX, planeY, lineScale, half) {
@@ -177,13 +199,68 @@ export class Renderer {
     const darkFloor = floorTex.levels[0];
     for (let x = 0; x < w; x++) px[horizon + x] = darkFloor[0];
   }
+
+  // Billboarded pawns for the other players, depth-tested per column against
+  // the wall pass. Returns screen positions so the page can hang name tags.
+  #drawPeers(cam, peers, dirX, dirY, planeX, planeY, lineScale, half) {
+    const labels = [];
+    if (!peers.length) return labels;
+    const { w, h, px } = this;
+    const sprite = this.tex.pawn;
+    const invDet = 1 / (planeX * dirY - dirX * planeY);
+    const order = peers
+      .map((p) => ({ p, d: (p.x - cam.x) ** 2 + (p.y - cam.y) ** 2 }))
+      .sort((a, b) => b.d - a.d); // far to near
+
+    for (const { p } of order) {
+      const relX = p.x - cam.x;
+      const relY = p.y - cam.y;
+      const camX = invDet * (dirY * relX - dirX * relY);
+      const depth = invDet * (-planeY * relX + planeX * relY);
+      if (depth <= 0.12 || depth > FOG_DIST) continue;
+
+      const screenX = (w / 2) * (1 + camX / depth);
+      const floorY = half + (0.5 * lineScale) / depth; // feet stand on the floor
+      const height = (PAWN_HEIGHT * lineScale) / depth;
+      const width = height * (sprite.w / sprite.h);
+      const top = floorY - height;
+      const x0 = Math.max(0, Math.ceil(screenX - width / 2));
+      const x1 = Math.min(w - 1, Math.floor(screenX + width / 2));
+      const y0 = Math.max(0, Math.ceil(top));
+      const y1 = Math.min(h - 1, Math.floor(floorY));
+      if (x1 < x0 || y1 < y0) continue;
+
+      const [cr, cg, cb] = p.finished ? FINISHED_COLOR : playerColor(p.id);
+      // Pawns keep a floor of light so they stay readable down a dark corridor.
+      const fog = Math.max(0.42, 1 - depth / FOG_DIST);
+      let drawn = false;
+
+      for (let x = x0; x <= x1; x++) {
+        if (depth >= this.zbuf[x]) continue;
+        const sx = (((x - (screenX - width / 2)) * sprite.w) / width) | 0;
+        if (sx < 0 || sx >= sprite.w) continue;
+        for (let y = y0; y <= y1; y++) {
+          const sy = (((y - top) * sprite.h) / height) | 0;
+          if (sy < 0 || sy >= sprite.h) continue;
+          const si = sy * sprite.w + sx;
+          if (!sprite.mask[si]) continue;
+          const shade = sprite.lum[si] * fog;
+          px[y * w + x] =
+            (0xff000000 | (((cb * shade) | 0) << 16) | (((cg * shade) | 0) << 8) | ((cr * shade) | 0)) >>> 0;
+          drawn = true;
+        }
+      }
+      if (drawn) labels.push({ id: p.id, x: screenX, y: top, depth });
+    }
+    return labels;
+  }
 }
 
 function clampLevel(level) {
   return level < 0 ? 0 : level > LEVELS - 1 ? LEVELS - 1 : level;
 }
 
-export function drawMinimap(canvas, maze, cam, { visited = null, scale = 6 } = {}) {
+export function drawMinimap(canvas, maze, cam, { visited = null, scale = 6, peers = [] } = {}) {
   const ctx = canvas.getContext("2d");
   const size = Math.min(canvas.width / maze.w, canvas.height / maze.h);
   const s = scale ? Math.min(scale, size) : size;
@@ -201,6 +278,12 @@ export function drawMinimap(canvas, maze, cam, { visited = null, scale = 6 } = {
       else ctx.fillStyle = "rgba(178,74,54,0.5)";
       ctx.fillRect(offX + x * s, offY + y * s, s, s);
     }
+  }
+
+  for (const p of peers) {
+    const [r, g, b] = playerColor(p.id);
+    ctx.fillStyle = `rgb(${r | 0} ${g | 0} ${b | 0})`;
+    ctx.fillRect(offX + p.x * s - 1, offY + p.y * s - 1, Math.max(2, s), Math.max(2, s));
   }
 
   ctx.fillStyle = "#ffcc66";

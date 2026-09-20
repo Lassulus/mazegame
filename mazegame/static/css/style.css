@@ -415,6 +415,61 @@ body.touch .overlay {
   box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
 }
 
+/* ---- other players ---- */
+
+.labels {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 1px 5px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: #fff;
+  background: rgba(8, 10, 16, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+}
+
+.events {
+  position: fixed;
+  left: 14px;
+  bottom: 52px;
+  z-index: 4;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  pointer-events: none;
+}
+
+.event {
+  padding: 3px 8px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--nix-light);
+  background: rgba(8, 14, 26, 0.8);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  animation: fade-in 0.2s ease;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+
 .join-card img {
   width: 56px;
   height: 56px;

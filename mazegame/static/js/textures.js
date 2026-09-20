@@ -145,6 +145,47 @@ function logoTexture(img, size = 256) {
   return new Uint32Array(data.buffer.slice(0));
 }
 
+// The other wanderers. Stored as a shape mask plus a luminance map so each
+// player can be tinted with their own colour at draw time.
+function pawnSprite(w = 32, h = 48) {
+  const rnd = mulberry32(0x9a17);
+  const mask = new Uint8Array(w * h);
+  const lum = new Float32Array(w * h);
+  const headY = 10;
+  const headR = 7.2;
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = x + 0.5 - w / 2;
+      const head = Math.hypot(dx, y + 0.5 - headY) <= headR;
+      // Shoulders flare out under the head, hem is widest at the floor.
+      const bodyTop = headY + headR - 2;
+      const t = (y - bodyTop) / (h - bodyTop);
+      const halfWidth = 4.5 + 6.5 * Math.min(1, Math.max(0, t)) ** 0.7;
+      const body = y >= bodyTop && y < h - 1 && Math.abs(dx) <= halfWidth;
+      if (!head && !body) continue;
+      mask[y * w + x] = 1;
+      const round = 1 - Math.abs(dx) / (head ? headR : halfWidth + 0.001);
+      const shade = 0.55 + 0.45 * Math.sqrt(Math.max(0, round));
+      lum[y * w + x] = (head ? shade * 1.15 : shade) * (0.94 + rnd() * 0.12);
+    }
+  }
+
+  // One pixel of dark outline so a pawn never melts into the brickwork.
+  const outline = new Uint8Array(mask);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!outline[y * w + x]) continue;
+      const edge =
+        x === 0 || x === w - 1 || y === 0 || y === h - 1 ||
+        !outline[y * w + x - 1] || !outline[y * w + x + 1] ||
+        !outline[(y - 1) * w + x] || !outline[(y + 1) * w + x];
+      if (edge) lum[y * w + x] = 0.16;
+    }
+  }
+  return { w, h, mask, lum };
+}
+
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -162,5 +203,6 @@ export async function loadTextures() {
     floor: shadeAll(floorTexture(), 64),
     ceiling: shadeAll(ceilingTexture(), 64),
     exit: shadeAll(logoTexture(logo), 256, { emissive: true, floor: 0.35 }),
+    pawn: pawnSprite(),
   };
 }

@@ -5,11 +5,12 @@ export const EMPTY = 0;
 export const WALL = 1;
 export const EXIT = 2;
 
-export const CELLS = 11; // cells per side -> 23x23 tile grid
+// 25x25 cells -> 51x51 tiles, five times the floor area of the original 11x11.
+export const CELLS = 25;
 
-// How long the "escaped" card stays up before the next maze appears. Shared so
-// the spectator camera swaps mazes at the same moment the player does.
-export const WIN_DWELL = 1800;
+// How long the "escaped" card stays on screen. The world itself only rolls
+// over when the server says so (2 minutes after the first escape).
+export const WIN_DWELL = 2600;
 
 export function mulberry32(seed) {
   let a = seed >>> 0;

@@ -18,7 +18,7 @@ from .hub import Hub
 from .ws import WebSocket, WSError, accept_key
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
-TICK_HZ = 10.0
+TICK_HZ = 20.0  # watcher rotation checks and peer position snapshots
 SILENCE_TIMEOUT = 12.0  # seconds without any client frame before we hang up
 
 mimetypes.add_type("image/svg+xml", ".svg")
@@ -135,11 +135,13 @@ class MazeHandler(BaseHTTPRequestHandler):
         player = self.hub.add_player(sock, name)
         self.log_event(f"player {player.pid} {player.name} joined")
         try:
+            roster = self.hub.roster()
             sock.send(json.dumps({
                 "t": "welcome",
                 "id": player.pid,
                 "name": player.name,
-                "seed": player.seed,
+                "roster": roster,
+                **self.hub.world(),
             }))
             while True:
                 raw = sock.recv()
@@ -155,8 +157,7 @@ class MazeHandler(BaseHTTPRequestHandler):
                         player, float(msg["x"]), float(msg["y"]), float(msg["a"])
                     )
                 elif kind == "escaped":
-                    seed = self.hub.player_escaped(player)
-                    sock.send(json.dumps({"t": "seed", "seed": seed}))
+                    self.hub.record_finish(player)
         finally:
             self.hub.drop_player(player)
             self.log_event(f"player {player.pid} {player.name} left")
@@ -164,6 +165,7 @@ class MazeHandler(BaseHTTPRequestHandler):
     def _watch_loop(self, sock: WebSocket, query: dict[str, list[str]]) -> None:
         watcher = self.hub.add_watcher(sock)
         self.log_event(f"watcher {watcher.wid} joined")
+        sock.send(json.dumps({"t": "roster", "players": self.hub.roster()}))
         try:
             while True:
                 raw = sock.recv()
@@ -190,9 +192,14 @@ class MazeHandler(BaseHTTPRequestHandler):
             print(f"[{time.strftime('%H:%M:%S')}] {fmt % args}", flush=True)
 
 
-def serve(host: str = "127.0.0.1", port: int = 8080, verbose: bool = False):
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    verbose: bool = False,
+    grace: float | None = None,
+):
     """Build a running server. Returns (httpd, hub); caller drives serve_forever."""
-    hub = Hub()
+    hub = Hub(grace=grace) if grace is not None else Hub()
     handler = type("BoundMazeHandler", (MazeHandler,), {"hub": hub, "verbose": verbose})
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True

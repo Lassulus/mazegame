@@ -3,10 +3,15 @@
 A Windows 95 "Maze" screensaver you can actually play, in a browser tab.
 Brick corridors, a pixelated raycaster, and an exit made of the NixOS snowflake.
 
+Everyone shares one 51x51 maze and sees the other wanderers as coloured pawns
+with name tags. The first player to touch the snowflake starts a two-minute
+countdown; when it expires the whole world rolls over to a fresh maze and
+everybody respawns together. Players who made it are drawn in NixOS blue.
+
 Two pages:
 
-- `/` — **play**: pick a name (blank gets you a generated one), then wander a
-  seeded maze until you reach the logo and get a new one.
+- `/` — **play**: pick a name (blank gets you a generated one), then race the
+  others to the logo.
 - `/watch` — **maze cam**: rides along with one random player. When that player
   stops moving for 2 seconds, the camera cuts to the next player.
 
@@ -26,6 +31,10 @@ python3 -m mazegame --port 8080 # straight from a checkout
 
 Then open <http://127.0.0.1:8080/> to play and <http://127.0.0.1:8080/watch> to
 watch. Bind publicly with `--host 0.0.0.0`.
+
+`--grace SECONDS` changes the countdown that starts at the first escape
+(default 120); handy when testing, since a round otherwise takes two minutes
+to turn over.
 
 ## Hosting it on NixOS
 
@@ -55,6 +64,7 @@ so there is nothing to back up or migrate.
 | `services.mazegame.package` | package | this flake's build | swap in your own build |
 | `services.mazegame.host` | str | `"127.0.0.1"` | bind address |
 | `services.mazegame.port` | port | `8080` | listen port |
+| `services.mazegame.roundGrace` | int | `120` | seconds from first escape to the next maze |
 | `services.mazegame.openFirewall` | bool | `false` | open the port |
 
 Behind nginx, proxy `/` to the port and pass the WebSocket upgrade headers
@@ -85,8 +95,23 @@ walk, sideways to turn, all the way forward to run. One thumb is enough;
 dragging on the right half also turns if you prefer two. A fullscreen button
 sits above the bottom bar, and the watcher page switches players on any tap.
 
-`/?seed=12345` pins a specific maze, which is handy for racing a friend on the
-same layout.
+`/?seed=12345` pins a maze locally for testing; it detaches you from the shared
+world, so use it for screenshots rather than racing.
+
+## Rounds
+
+One maze is live at a time. `hub.Hub` owns the seed; clients rebuild the
+geometry from it with the same PRNG, so only positions cross the wire. When a
+player reaches the exit the server records their place and time, broadcasts it,
+and — for the first finisher only — arms a `ROUND_GRACE` (120 s) timer. Anyone
+still walking keeps playing and can still finish 2nd, 3rd, … When the timer
+expires every client gets `{"t":"world","seed":…}` and respawns on the shared
+spawn tile, jittered so pawns do not stack.
+
+Positions go out as one `peers` snapshot at 20 Hz to every player *and* every
+watcher, so a spectator sees the other wanderers too. Pawns are billboards
+depth-tested against the wall pass, so a player behind a wall is genuinely
+hidden rather than drawn on top.
 
 ## How the watcher picks a player
 
@@ -112,16 +137,18 @@ mazegame/
   hub.py      players, watchers, idle detection, switching policy
   server.py   HTTP static routes + /ws/play, /ws/watch, /api/state
   static/js/
-    maze.js      seeded recursive-backtracker maze; exit = furthest dead end
-    textures.js  procedural brick/floor/ceiling + the NixOS logo panel,
-                 pre-shaded into 24 brightness levels
-    render.js    DDA raycaster, floor/ceiling casting, minimap
-    play.js      input, collision, win condition
+    maze.js      seeded recursive-backtracker maze (25x25 cells = 51x51 tiles);
+                 exit = furthest dead end from spawn
+    textures.js  procedural brick/floor/ceiling, the NixOS logo panel and the
+                 player pawn, pre-shaded into 24 brightness levels
+    render.js    DDA raycaster, floor/ceiling casting, pawn sprites, minimap
+    tags.js      pooled name tags above visible players
+    play.js      input, collision, finish detection, round clock
     watch.js     spectator camera with interpolation and cut banners
 ```
 
-Both pages generate the maze from the same seed with the same PRNG, so the
-watcher only receives `{x, y, a}` updates (20 Hz) rather than any geometry.
+Both pages generate the maze from the shared seed, so the wire only ever
+carries `{id, x, y, a, finished}` tuples.
 
 Clients heartbeat every 3 s; the server hangs up on a socket that goes quiet for
 12 s, so a backgrounded or crashed tab cannot hold a slot in the camera rotation.
