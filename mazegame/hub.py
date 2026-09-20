@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 IDLE_SWITCH = 2.0  # seconds of stillness before a watcher moves on
 ROUND_GRACE = 120.0  # seconds between the first escape and the next maze
+ESCAPE_COOLDOWN = 2.0  # seconds between two escapes by one player (under the 2.6 s card dwell)
 MOVE_EPS = 0.015  # world units
 TURN_EPS = 0.015  # radians
 BUCKET = 8  # tiles per interest bucket edge
@@ -67,8 +68,10 @@ class Player:
     placed: bool = False
     joined: float = field(default_factory=time.monotonic)
     last_move: float = field(default_factory=time.monotonic)
-    finished_at: float | None = None
+    finished_at: float | None = None  # first escape; fixes the place
     place: int | None = None
+    escapes: int = 0
+    last_escape: float = 0.0
 
     def idle_for(self, now: float) -> float:
         return now - self.last_move
@@ -114,20 +117,33 @@ class Hub:
         return max(0.0, round(self.deadline - time.monotonic(), 2))
 
     def record_finish(self, player: Player) -> None:
-        """A player touched the logo. The first one starts the countdown."""
+        """A player touched the logo. The first one starts the countdown.
+
+        Later trips count too: after the escape card the client drops you back
+        into the maze, so the logo is worth walking to again. Only the first
+        escape takes a place, and only the first escape of the round arms the
+        countdown.
+        """
         with self._lock:
-            if player.finished_at is not None:
-                return  # already home; standing in the exit changes nothing
             now = time.monotonic()
-            player.finished_at = now
-            # The log belongs to the round, not to the connection: a winner who
-            # closes their tab must still be credited when the maze rolls over.
-            player.place = len(self.finishers) + 1
-            self.finishers.append({
-                "name": player.name,
-                "place": player.place,
-                "secs": round(now - self.round_started, 1),
-            })
+            # A client that never respawns cannot farm escapes by standing in
+            # the logo: one trip per dwell, at most.
+            if now - player.last_escape < ESCAPE_COOLDOWN:
+                return
+            player.last_escape = now
+            player.escapes += 1
+            secs = round(now - self.round_started, 1)
+            if player.finished_at is None:
+                player.finished_at = now
+                # The log belongs to the round, not to the connection: a winner
+                # who closes their tab must still be credited when the maze
+                # rolls over.
+                player.place = len(self.finishers) + 1
+                self.finishers.append({
+                    "name": player.name,
+                    "place": player.place,
+                    "secs": secs,
+                })
             first = self.deadline is None
             if first:
                 self.deadline = now + self.grace
@@ -136,7 +152,8 @@ class Hub:
                 "id": player.pid,
                 "name": player.name,
                 "place": player.place,
-                "secs": round(now - self.round_started, 1),
+                "secs": secs,
+                "runs": player.escapes,
                 "first": first,
                 "ends_in": self._ends_in(),
             })
@@ -153,6 +170,8 @@ class Hub:
             for player in self.players.values():
                 player.finished_at = None
                 player.place = None
+                player.escapes = 0
+                player.last_escape = 0.0
                 player.placed = False
                 player.last_move = now
             frame = json.dumps({"t": "world", "seed": self.seed, "winner": winner})

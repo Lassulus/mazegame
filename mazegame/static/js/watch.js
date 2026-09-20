@@ -91,7 +91,12 @@ const socket = createSocket("/ws/watch", {
       banner(msg.winner ? `NEW MAZE · ${msg.winner.toUpperCase()} WON` : "NEW MAZE", "win");
     } else if (msg.t === "finish") {
       state.endsAt = performance.now() + msg.ends_in * 1000;
-      banner(`${msg.name.toUpperCase()} ESCAPED`, "win");
+      banner(
+        msg.runs > 1
+          ? `${msg.name.toUpperCase()} ESCAPED ×${msg.runs}`
+          : `${msg.name.toUpperCase()} ESCAPED`,
+        "win",
+      );
     } else if (msg.t === "idle_pool") {
       state.target = null;
       state.maze = null;

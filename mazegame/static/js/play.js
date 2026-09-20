@@ -41,10 +41,12 @@ const pinnedSeed = params.has("seed") ? Number(params.get("seed")) >>> 0 : null;
 const state = {
   maze: null,
   cam: { x: 1.5, y: 1.5, a: 0 },
-  finished: false, // already reached the logo this round
+  finished: false, // banked a place this round (pawn turns NixOS blue)
+  escapes: 0, // times through the logo this round; you may go again
   holdUntil: 0, // frozen while the escape card is up
   respawns: 0,
-  startedAt: performance.now(),
+  startedAt: performance.now(), // round clock in the HUD
+  runStartedAt: performance.now(), // this trip's clock, reset on every spawn
   id: null,
   names: new Map(), // player id -> name
   peers: new Map(), // player id -> { id, x, y, a, finished }
@@ -57,6 +59,7 @@ function setMaze(seed) {
   state.maze = buildMaze(pinnedSeed ?? seed >>> 0);
   state.startedAt = performance.now();
   state.finished = false;
+  state.escapes = 0;
   state.holdUntil = 0;
   state.respawns = 0;
   visited.clear();
@@ -107,7 +110,11 @@ function connect(name) {
       } else if (msg.t === "finish") {
         state.endsAt = performance.now() + msg.ends_in * 1000;
         const who = msg.id === state.id ? "you" : msg.name;
-        note(`${who} escaped · ${ordinal(msg.place)} · ${msg.secs}s`);
+        note(
+          msg.runs > 1
+            ? `${who} escaped again · ×${msg.runs}`
+            : `${who} escaped · ${ordinal(msg.place)} · ${msg.secs}s`,
+        );
       } else if (msg.t === "watched") {
         elWatchers.textContent = msg.n;
         elWatched.classList.toggle("hidden", msg.n === 0);
@@ -266,25 +273,33 @@ function step(dt) {
     markVisited();
   }
 
-  if (!state.finished && Math.hypot(cam.x - maze.exit.x, cam.y - maze.exit.y) < WIN_DIST) win();
+  // No one-shot gate: every trip through the logo counts. The dwell freeze
+  // above keeps the same arrival from firing twice.
+  if (Math.hypot(cam.x - maze.exit.x, cam.y - maze.exit.y) < WIN_DIST) win();
 }
 
 function win() {
-  if (state.finished) return;
-  state.finished = true;
   const now = performance.now();
+  state.finished = true;
+  state.escapes++;
   state.holdUntil = now + WIN_DWELL;
-  const secs = (now - state.startedAt) / 1000;
+  const secs = (now - state.runStartedAt) / 1000;
+  const again = state.escapes > 1;
   showOverlay(
-    `<strong>ESCAPED</strong><br>${secs.toFixed(1)}s · ${state.spawnDist} tiles from your spawn` +
-      `<br><small>back into the maze — it changes when the countdown ends</small>`,
+    `<strong>ESCAPED${again ? ` &times;${state.escapes}` : ""}</strong><br>` +
+      `${secs.toFixed(1)}s · ${state.spawnDist} tiles from your spawn` +
+      `<br><small>${
+        again
+          ? "go again — the maze changes when the countdown ends"
+          : "back into the maze — it changes when the countdown ends"
+      }</small>`,
     "won",
   );
   socket && socket.send({ t: "escaped" });
   setTimeout(() => {
     hideOverlay();
-    // Dropped back in somewhere else so there is still a maze to wander
-    // while the countdown runs out.
+    // Dropped back in somewhere else so there is still a maze to wander,
+    // and another run at the logo for anyone who wants it.
     placeAt(spawnFor(state.maze, (state.id || 1) * 101 + ++state.respawns));
   }, WIN_DWELL);
 }
@@ -296,6 +311,7 @@ function placeAt(spawn) {
     a: spawn.a,
   };
   state.spawnDist = spawn.dist;
+  state.runStartedAt = performance.now();
   markVisited();
 }
 

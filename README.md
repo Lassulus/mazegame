@@ -112,10 +112,15 @@ still walking keeps playing and can still finish 2nd, 3rd, … When the timer
 expires every client gets `{"t":"world","seed":…}` and respawns.
 
 Reaching the logo does not park you there: the escape card holds you still for
-`WIN_DWELL`, then you are dropped back into the maze at a different spawn so
-there is still something to do while the countdown runs. Your place and time
-are already banked — `finished` stays set, so the exit does nothing until the
-world rolls over, and your pawn shows NixOS blue to everyone still looking.
+`WIN_DWELL` (2.6 s), then you are dropped back into the maze at a different
+spawn. The logo re-arms with you, so you can run it again — the card counts
+your trips (`ESCAPED ×3`) and the event feed says `escaped again · ×3`.
+
+Only the first escape takes a place: `record_finish` appends to `finishers`
+once per player, so the leaderboard is still the race, and only the first
+escape of the round arms the countdown. Repeats are rate-limited server-side
+by `ESCAPE_COOLDOWN` (2 s, just under the card dwell) so a client parked in
+the logo cannot spam the feed. Your pawn stays NixOS blue once you are home.
 
 Spawns are scattered: `spawnFor(maze, id)` picks a cell from the maze's spawn
 pool with a PRNG seeded on the maze **and** the player id, so a hundred
