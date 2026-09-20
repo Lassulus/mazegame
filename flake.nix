@@ -94,9 +94,9 @@
                   "--quiet"
                 ];
                 Restart = "on-failure";
-                # One socket and one thread per connected player; the systemd
-                # default of 1024 file descriptors caps the server at roughly
-                # a thousand players.
+                # One socket per connected player, all on one event loop; the
+                # systemd default of 1024 file descriptors caps the server at
+                # roughly a thousand players.
                 LimitNOFILE = 65536;
                 TasksMax = 8192;
                 DynamicUser = true;
@@ -157,16 +157,71 @@
                 port = 8080;
               };
             };
-            testScript = ''
-              machine.wait_for_unit("mazegame.service")
-              machine.wait_for_open_port(8080)
-              machine.succeed("curl -sf http://127.0.0.1:8080/ | grep -q 'NIXOS MAZE'")
-              machine.succeed("curl -sf http://127.0.0.1:8080/watch | grep -q 'MAZE CAM'")
-              machine.succeed("curl -sf http://127.0.0.1:8080/js/play.js | grep -q createTouchControls")
-              machine.succeed("curl -sf http://127.0.0.1:8080/img/nix-snowflake.svg | grep -q '</svg>'")
-              machine.succeed("curl -sf http://127.0.0.1:8080/api/state | grep -q players")
-              machine.succeed("systemctl show -p DynamicUser mazegame.service | grep -q DynamicUser=yes")
-            '';
+            testScript =
+              let
+                # A real handshake, a real position update and a real snapshot
+                # back: the game is a websocket server, so booting and serving
+                # HTML proves only half of it.
+                wsProbe = pkgs.writers.writePython3 "mazegame-ws-probe" { } ''
+                  import base64
+                  import json
+                  import os
+                  import socket
+                  import struct
+
+                  sock = socket.create_connection(("127.0.0.1", 8080), timeout=10)
+                  key = base64.b64encode(os.urandom(16)).decode()
+                  sock.sendall(
+                      f"GET /ws/play?name=probe HTTP/1.1\r\nHost: localhost\r\n"
+                      f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode()
+                  )
+                  head = b""
+                  while b"\r\n\r\n" not in head:
+                      head += sock.recv(4096)
+                  assert b"101 Switching Protocols" in head, head
+
+                  body = json.dumps({"t": "pos", "x": 5.5, "y": 5.5, "a": 0.0}).encode()
+                  mask = os.urandom(4)
+                  sock.sendall(
+                      struct.pack("!BB", 0x81, 0x80 | len(body))
+                      + mask
+                      + bytes(b ^ mask[i % 4] for i, b in enumerate(body))
+                  )
+
+
+                  def frame():
+                      first = sock.recv(2)
+                      size = first[1] & 0x7F
+                      if size == 126:
+                          size = struct.unpack("!H", sock.recv(2))[0]
+                      data = b""
+                      while len(data) < size:
+                          data += sock.recv(size - len(data))
+                      return json.loads(data)
+
+
+                  kinds = set()
+                  for _ in range(8):
+                      kinds.add(frame()["t"])
+                      if {"welcome", "peers"} <= kinds:
+                          break
+                  assert {"welcome", "peers"} <= kinds, kinds
+                  print("websocket ok")
+                '';
+              in
+              ''
+                machine.wait_for_unit("mazegame.service")
+                machine.wait_for_open_port(8080)
+                machine.succeed("curl -sf http://127.0.0.1:8080/ | grep -q 'NIXOS MAZE'")
+                machine.succeed("curl -sf http://127.0.0.1:8080/watch | grep -q 'MAZE CAM'")
+                machine.succeed("curl -sf http://127.0.0.1:8080/js/play.js | grep -q createTouchControls")
+                machine.succeed("curl -sf http://127.0.0.1:8080/img/nix-snowflake.svg | grep -q '</svg>'")
+                machine.succeed("curl -sf http://127.0.0.1:8080/api/state | grep -q perf")
+                machine.succeed("curl -sf 'http://127.0.0.1:8080/api/state?full=1' | grep -q players")
+                machine.succeed("${wsProbe} | grep -q 'websocket ok'")
+                machine.succeed("systemctl show -p DynamicUser mazegame.service | grep -q DynamicUser=yes")
+              '';
           };
         }
       );

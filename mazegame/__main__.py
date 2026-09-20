@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 
 from .hub import ROUND_GRACE
 from .server import serve
@@ -21,19 +22,20 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    httpd, _hub = serve(args.host, args.port, verbose=not args.quiet, grace=args.grace)
-    host, port = httpd.server_address[:2]
+    asyncio.run(_run(args))
+    return 0
+
+
+async def _run(args) -> None:
+    server, _hub = await serve(args.host, args.port, verbose=not args.quiet, grace=args.grace)
+    host, port = server.sockets[0].getsockname()[:2]
     shown = f"[{host}]" if ":" in str(host) else host
     print(f"mazegame: play at http://{shown}:{port}/  watch at http://{shown}:{port}/watch")
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
+        async with server:
+            await server.serve_forever()
+    except (KeyboardInterrupt, asyncio.CancelledError):
         print()
-    finally:
-        httpd.stop_ticker.set()
-        httpd.shutdown()
-        httpd.server_close()
-    return 0
 
 
 if __name__ == "__main__":

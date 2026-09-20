@@ -14,7 +14,7 @@ const RUN = 2.8;
 const TURN = 2.5; // radians/second
 const MOUSE = 0.0022;
 const RADIUS = 0.24;
-const SEND_HZ = 20;
+const SEND_HZ = 20; // until the server says otherwise in its snapshots
 const WIN_DIST = 0.9;
 
 const view = document.getElementById("view");
@@ -51,6 +51,7 @@ const state = {
   names: new Map(), // player id -> name
   peers: new Map(), // player id -> { id, x, y, a, finished }
   endsAt: null, // performance.now() deadline for the world rollover
+  sendHz: SEND_HZ, // position updates per second, paced by the server
 };
 state.renderer = renderer;
 window.mazegame = state; // handy for the console and for smoke tests
@@ -132,6 +133,9 @@ function applyWorld(world) {
 // each one shows up, so there is no roster broadcast to fan out.
 function applyPeers(msg) {
   elPlayers.textContent = msg.n;
+  // A crowded room snapshots at 10 Hz; sending 20 Hz of position into it just
+  // makes the server parse frames it will never forward.
+  if (msg.hz) state.sendHz = Math.min(SEND_HZ, msg.hz);
   const now = performance.now();
   const seen = new Set();
   for (const [id, x, y, a, finished, name] of msg.l) {
@@ -179,7 +183,7 @@ function note(text) {
 
 let lastSent = 0;
 function pushPosition(now) {
-  if (!socket || now - lastSent < 1000 / SEND_HZ) return;
+  if (!socket || now - lastSent < 1000 / state.sendHz) return;
   lastSent = now;
   socket.send({ t: "pos", x: state.cam.x, y: state.cam.y, a: state.cam.a });
 }

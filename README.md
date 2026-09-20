@@ -139,21 +139,44 @@ genuinely hidden rather than drawn on top.
 
 Everything here is measured with synthetic clients against one process:
 
+- **One event loop, no threads.** The server was thread-per-connection with
+  blocking writes. At 800 players the hub thread spent *five seconds* inside
+  a single `send` to a client that had stopped reading, every other player
+  froze behind it, and 687 of 813 sampled thread-seconds (py-spy) sat blocked
+  on the hub lock in `move_player`. `server.py` now runs one asyncio loop
+  that owns every socket and the tick.
+- **Snapshots are droppable.** `Conn.send` writes into the transport buffer
+  and checks how much is queued: past `LAG_BYTES` (128 KB) a client stops
+  getting snapshots, past `DEAD_BYTES` (1 MB) the socket is cut. A position
+  frame is state, not history — skipping one costs that client a tick and
+  costs the room nothing. `/api/state` reports `dropped`.
+- **A short lock.** The hub copies the bodies it needs under the lock and
+  selects, encodes and sends outside it. `move_player` takes no lock at all:
+  it is 16k calls a second at 800 players, the writes are atomic under the
+  GIL, and a reader that catches a new x with an old y is off by one frame of
+  walking for one tick.
 - **Interest management.** Sending every position to every player is
   quadratic: at 560 players that was a 10 KB frame fanned out 560 times, 20
-  times a second — 114 MB/s. A bucket index (`BUCKET` = 8 tiles) bounds the
-  candidate set and each client gets the `PEER_LIMIT` (20) nearest bodies
-  **centred on itself**, names inline. Above `PEER_EXACT_MAX` players the
-  candidates are shortlisted per bucket first. A spectator's list is always
-  built exactly around its target: a shared per-bucket list drops whoever is
-  furthest from the bucket's middle, which in a crowd is precisely the player
-  the camera is following, and the view freezes.
+  times a second — 114 MB/s. A bucket index bounds the candidate set and each
+  client gets the `PEER_LIMIT` (20) nearest bodies, names inline.
+- **Shared frames in a crowd.** Below `PEER_EXACT_MAX` (120) every client
+  gets its own list centred on itself out of `BUCKET` (8 tile) cells. Above
+  it, one frame is built per `CROWD_BUCKET` (4 tile) cell and the same bytes
+  go to everyone standing there: 800 players cost ~160 frames instead of 800,
+  13 ms instead of 77. The tighter cell also aims better than the per-bucket
+  shortlist it replaces — of a player's eight nearest neighbours it misses
+  3.7 % against the shortlist's 29.5 %. Spectators are always built exactly
+  around their target, which is what keeps a camera from losing its player.
 - **One encode per body.** A body serialises identically for every viewer, so
-  each is `json.dumps`-ed once per tick and frames are assembled by joining
-  strings. This alone took 200 players from 4.8 Hz to 9.8 Hz.
-- **Tick cadence.** The hub thread sleeps the *remainder* of its period. A
-  fixed 50 ms sleep plus 30 ms of work silently halves the update rate.
-- **Interpolation.** Snapshots arrive 10-20 times a second, frames are drawn
+  each is encoded once per tick (hand-rolled, with the name JSON-escaped once
+  at join) and frames are assembled by joining strings. This alone took 200
+  players from 4.8 Hz to 9.8 Hz.
+- **Cadence that scales.** `snapshot_interval` gives a quiet room 20 Hz, 150+
+  players 10 Hz and 500+ players 6.7 Hz, because at 800 a tick costs ~20 ms
+  to build and ~40 ms to write. The rate rides along in every snapshot as
+  `hz` and clients pace their own position updates off it, so a crowded room
+  also stops paying for 20 Hz of inbound traffic it would never forward.
+- **Interpolation.** Snapshots arrive 7-20 times a second, frames are drawn
   60 times a second. `interp.js` glides every remote body (and the spectator
   camera) between the last two samples. Measured on the camera with 100
   players: snapping moved in 13 of 149 frames with jumps up to 0.16 tiles;
@@ -161,23 +184,31 @@ Everything here is measured with synthetic clients against one process:
 - **No roster broadcast.** It was a 14 KB frame to everyone on every join —
   8 MB of traffic per player arriving. Names ride along in the peer entries
   instead, so a client learns a name exactly when it can see its owner.
-- **Accept backlog.** `socketserver` listens with a backlog of 5, so a crowd
-  arriving at once had connections refused by the kernel. `MazeServer` sets
-  `request_queue_size = 256`.
-- **Limits.** One socket and one thread per player, so the unit sets
-  `LimitNOFILE = 65536` and `TasksMax = 8192`; systemd's default of 1024 file
-  descriptors otherwise caps the server at about a thousand players. nginx
-  needs raising too — its default single worker with 512 connections caps you
-  at ~250 players, since a proxied websocket costs two connections.
+- **Cheap ops endpoint.** `/api/state` answers with counters and tick timings
+  (`build_ms`, `send_ms`, `frames`, `slow`, `dropped`); the per-player roster
+  is behind `?full=1`, because serialising 800 players on every poll is real
+  work on the loop that runs the game.
+- **Accept backlog.** A link going around arrives as a burst of SYNs, so the
+  listener uses a backlog of 512 rather than the stdlib's 5.
+- **Limits.** One socket per player: the unit sets `LimitNOFILE = 65536`;
+  systemd's default of 1024 otherwise caps the server at about a thousand
+  players. nginx needs raising too — its default single worker with 512
+  connections caps you at ~250 players, since a proxied websocket costs two
+  connections.
 - **Client fill budget.** A crowd standing in one room used to cost several
   full-screen sprite fills per frame. The renderer draws the nearest pawns
   within `PAWN_FILL_BUDGET` screenfuls (`MAX_PAWNS` cap), and the minimap's
   static layer is cached instead of repainting 2601 tiles every frame.
 
-Measured on one core with every player piled into the same room (the worst
-case for interest management): **100 players at 19.3 Hz, 200 at 9.8 Hz, 1000
-connected with zero refused connections**, ~76 % CPU, 64 MB RSS, page served
-in 3 ms throughout.
+Measured on one core, players scattered and walking, snapshot gap seen by the
+clients themselves:
+
+| players | before | now |
+| --- | --- | --- |
+| 200 | 177 ms p50 | 92 ms p50, 162 ms p99 |
+| 400 | 399 ms p50 | 97 ms p50, 196 ms p99 |
+| 800 | 1666 ms p50, connections timing out | 146 ms p50, 289 ms p99, zero errors |
+| 1200 | — | 243 ms p50, all 1200 connected |
 
 ## Maze shape
 
@@ -213,9 +244,9 @@ Players are told when a camera is on them ("ON CAMERA" badge, top left).
 
 ```
 mazegame/
-  ws.py       RFC 6455 framing (text frames, ping/pong, close)
-  hub.py      players, watchers, idle detection, switching policy
-  server.py   HTTP static routes + /ws/play, /ws/watch, /api/state
+  ws.py       RFC 6455 framing: incremental parser, no socket of its own
+  hub.py      players, watchers, idle detection, switching policy, snapshots
+  server.py   asyncio HTTP + /ws/play, /ws/watch, /api/state, the tick
   static/js/
     maze.js      seeded recursive-backtracker maze (25x25 cells = 51x51 tiles);
                  exit = furthest dead end from spawn
