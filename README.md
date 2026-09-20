@@ -108,10 +108,36 @@ still walking keeps playing and can still finish 2nd, 3rd, … When the timer
 expires every client gets `{"t":"world","seed":…}` and respawns on the shared
 spawn tile, jittered so pawns do not stack.
 
-Positions go out as one `peers` snapshot at 20 Hz to every player *and* every
-watcher, so a spectator sees the other wanderers too. Pawns are billboards
-depth-tested against the wall pass, so a player behind a wall is genuinely
-hidden rather than drawn on top.
+Positions go out at 20 Hz (10 Hz above 60 players), but each client only gets
+the neighbours around it, not the whole roster — see Scaling. Pawns are
+billboards depth-tested against the wall pass, so a player behind a wall is
+genuinely hidden rather than drawn on top.
+
+## Scaling
+
+Everything here is measured with synthetic clients against one process:
+
+- **Interest management.** Sending every position to every player is
+  quadratic: at 560 players that was a 10 KB frame fanned out 560 times, 20
+  times a second — 114 MB/s. The map is bucketed (`BUCKET` = 8 tiles) and one
+  frame is built per occupied bucket with the nearest `PEER_LIMIT` (20)
+  neighbours, names inline. 1000 players now cost under 1 MB/s.
+- **No roster broadcast.** It was a 14 KB frame to everyone on every join —
+  8 MB of traffic per player arriving. Names ride along in the peer entries
+  instead, so a client learns a name exactly when it can see its owner.
+- **Accept backlog.** `socketserver` listens with a backlog of 5, so a crowd
+  arriving at once had connections refused by the kernel. `MazeServer` sets
+  `request_queue_size = 256`.
+- **Limits.** One socket and one thread per player, so the unit sets
+  `LimitNOFILE = 65536` and `TasksMax = 8192`; systemd's default of 1024 file
+  descriptors otherwise caps the server at about a thousand players.
+- **Client fill budget.** A crowd standing in one room used to cost several
+  full-screen sprite fills per frame. The renderer draws the nearest pawns
+  within `PAWN_FILL_BUDGET` screenfuls (`MAX_PAWNS` cap), and the minimap's
+  static layer is cached instead of repainting 2601 tiles every frame.
+
+Measured ceiling on one core: **1000 players, zero refused connections, ~76 %
+CPU, 64 MB RSS**, page still served in 3 ms.
 
 ## Maze shape
 

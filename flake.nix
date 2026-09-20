@@ -94,6 +94,11 @@
                   "--quiet"
                 ];
                 Restart = "on-failure";
+                # One socket and one thread per connected player; the systemd
+                # default of 1024 file descriptors caps the server at roughly
+                # a thousand players.
+                LimitNOFILE = 65536;
+                TasksMax = 8192;
                 DynamicUser = true;
                 NoNewPrivileges = true;
                 PrivateDevices = true;

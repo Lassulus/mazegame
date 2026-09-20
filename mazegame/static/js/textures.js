@@ -145,8 +145,11 @@ function logoTexture(img, size = 256) {
   return new Uint32Array(data.buffer.slice(0));
 }
 
-// The other wanderers. Stored as a shape mask plus a luminance map so each
-// player can be tinted with their own colour at draw time.
+// The other wanderers. Shading is quantised into PAWN_SHADES steps so the
+// raycaster's inner loop is a table lookup instead of three multiplies: 0
+// means transparent, 1..PAWN_SHADES-1 index a per-player colour ramp.
+export const PAWN_SHADES = 16;
+
 function pawnSprite(w = 32, h = 48) {
   const rnd = mulberry32(0x9a17);
   const mask = new Uint8Array(w * h);
@@ -183,7 +186,14 @@ function pawnSprite(w = 32, h = 48) {
       if (edge) lum[y * w + x] = 0.16;
     }
   }
-  return { w, h, mask, lum };
+
+  const shades = new Uint8Array(w * h);
+  for (let i = 0; i < shades.length; i++) {
+    if (!mask[i]) continue;
+    const step = Math.round(lum[i] * (PAWN_SHADES - 1));
+    shades[i] = Math.max(1, Math.min(PAWN_SHADES - 1, step));
+  }
+  return { w, h, shades };
 }
 
 function loadImage(src) {
@@ -202,7 +212,8 @@ export async function loadTextures() {
     wall: shadeAll(brickTexture(), 64),
     floor: shadeAll(floorTexture(), 64),
     ceiling: shadeAll(ceilingTexture(), 64),
-    exit: shadeAll(logoTexture(logo), 256, { emissive: true, floor: 0.35 }),
+    // 128px keeps the snowflake crisp at wall scale; 256 cost 6 MB of LUTs.
+    exit: shadeAll(logoTexture(logo, 128), 128, { emissive: true, floor: 0.35 }),
     pawn: pawnSprite(),
   };
 }

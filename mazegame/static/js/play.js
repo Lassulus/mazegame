@@ -47,6 +47,7 @@ const state = {
   peers: new Map(), // player id -> { id, x, y, a, finished }
   endsAt: null, // performance.now() deadline for the world rollover
 };
+state.renderer = renderer;
 window.mazegame = state; // handy for the console and for smoke tests
 
 function setMaze(seed) {
@@ -94,17 +95,15 @@ function connect(name) {
         state.id = msg.id;
         elName.textContent = msg.name;
         document.title = `${msg.name} · NixOS Maze`;
-        applyRoster(msg.roster);
+        elPlayers.textContent = msg.players;
         applyWorld(msg);
         for (const f of msg.finishers) note(`${f.name} escaped · ${ordinal(f.place)}`);
       } else if (msg.t === "world") {
         setMaze(msg.seed);
         state.endsAt = null;
         note(msg.winner ? `new maze · ${msg.winner} won the last one` : "new maze");
-      } else if (msg.t === "roster") {
-        applyRoster(msg.players);
       } else if (msg.t === "peers") {
-        applyPeers(msg.l);
+        applyPeers(msg);
       } else if (msg.t === "finish") {
         state.endsAt = performance.now() + msg.ends_in * 1000;
         const who = msg.id === state.id ? "you" : msg.name;
@@ -122,17 +121,13 @@ function applyWorld(world) {
   state.endsAt = world.ends_in === null ? null : performance.now() + world.ends_in * 1000;
 }
 
-function applyRoster(list) {
-  state.names = new Map(list.map((p) => [p.id, p.name]));
-  elPlayers.textContent = list.length;
-  for (const id of [...state.peers.keys()]) {
-    if (!state.names.has(id)) state.peers.delete(id);
-  }
-}
-
-function applyPeers(list) {
+// The server only sends the neighbours in view, names included the first time
+// each one shows up, so there is no roster broadcast to fan out.
+function applyPeers(msg) {
+  elPlayers.textContent = msg.n;
   const seen = new Set();
-  for (const [id, x, y, a, finished] of list) {
+  for (const [id, x, y, a, finished, name] of msg.l) {
+    if (name) state.names.set(id, name);
     if (id === state.id) continue; // that one is us
     seen.add(id);
     state.peers.set(id, { id, x, y, a, finished: !!finished });

@@ -81,11 +81,7 @@ const socket = createSocket("/ws/watch", {
       document.body.classList.add("flash");
       setTimeout(() => document.body.classList.remove("flash"), 220);
     } else if (msg.t === "peers") {
-      applyPeers(msg.l);
-    } else if (msg.t === "roster") {
-      state.names = new Map(msg.players.map((p) => [p.id, p.name]));
-      state.players = msg.players.length;
-      elPlayers.textContent = state.players;
+      applyPeers(msg);
     } else if (msg.t === "world") {
       state.maze = buildMaze(msg.seed >>> 0);
       state.endsAt = null;
@@ -109,9 +105,12 @@ const socket = createSocket("/ws/watch", {
 });
 
 // The camera rides the watched player; everyone else is drawn as a pawn.
-function applyPeers(list) {
+function applyPeers(msg) {
+  state.players = msg.n;
+  elPlayers.textContent = msg.n;
   const seen = new Set();
-  for (const [id, x, y, a, finished] of list) {
+  for (const [id, x, y, a, finished, name] of msg.l) {
+    if (name) state.names.set(id, name);
     if (state.target && id === state.target.id) {
       state.want = { x, y, a };
       const moved =

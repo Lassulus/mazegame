@@ -2,13 +2,16 @@
 // and per-pixel writes into an ImageData buffer.
 
 import { EMPTY, EXIT, tileAt } from "./maze.js";
-import { LEVELS, loadTextures } from "./textures.js";
+import { LEVELS, PAWN_SHADES, loadTextures } from "./textures.js";
 
 const FOG_DIST = 14; // tiles until full darkness
 const MAX_STEPS = 128;
 const MIN_PLANE = 0.75; // ~74 degrees horizontal, the narrowest we allow
 const PAWN_HEIGHT = 0.72; // world units, a bit shorter than a wall
 const FINISHED_COLOR = [126, 186, 228]; // NixOS blue for players who escaped
+const NEAR_PAWN = 0.45; // closer than this a pawn is just a wall of colour
+const MAX_PAWNS = 10; // hard cap on sprites per frame
+const PAWN_FILL_BUDGET = 0.9; // screenfuls of sprite fill allowed per frame
 
 // Stable per-player hue: golden-angle spacing keeps neighbours distinct.
 export function playerColor(id) {
@@ -21,6 +24,17 @@ export function playerColor(id) {
     return 255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)));
   };
   return [f(0), f(8), f(4)];
+}
+
+// One packed colour per shade step, rebuilt per pawn per frame (16 entries).
+const rampScratch = new Uint32Array(PAWN_SHADES);
+function colorRamp(r, g, b, fog) {
+  for (let i = 1; i < PAWN_SHADES; i++) {
+    const k = (fog * i) / (PAWN_SHADES - 1);
+    rampScratch[i] =
+      (0xff000000 | (((b * k) | 0) << 16) | (((g * k) | 0) << 8) | ((r * k) | 0)) >>> 0;
+  }
+  return rampScratch;
 }
 
 // Phones have few CSS pixels to spare; keep the chunky look without turning
@@ -208,21 +222,37 @@ export class Renderer {
     const { w, h, px } = this;
     const sprite = this.tex.pawn;
     const invDet = 1 / (planeX * dirY - dirX * planeY);
-    const order = peers
-      .map((p) => ({ p, d: (p.x - cam.x) ** 2 + (p.y - cam.y) ** 2 }))
-      .sort((a, b) => b.d - a.d); // far to near
 
-    for (const { p } of order) {
+    // Project first, then spend a fixed fill budget on the nearest pawns. A
+    // crowd in one room would otherwise cost several full-screen fills per
+    // frame and stall a phone into an unresponsive tab.
+    const visible = [];
+    for (const p of peers) {
       const relX = p.x - cam.x;
       const relY = p.y - cam.y;
-      const camX = invDet * (dirY * relX - dirX * relY);
       const depth = invDet * (-planeY * relX + planeX * relY);
-      if (depth <= 0.12 || depth > FOG_DIST) continue;
-
+      if (depth <= NEAR_PAWN || depth > FOG_DIST) continue;
+      const camX = invDet * (dirY * relX - dirX * relY);
       const screenX = (w / 2) * (1 + camX / depth);
-      const floorY = half + (0.5 * lineScale) / depth; // feet stand on the floor
       const height = (PAWN_HEIGHT * lineScale) / depth;
       const width = height * (sprite.w / sprite.h);
+      if (screenX + width / 2 < 0 || screenX - width / 2 > w) continue;
+      visible.push({ p, depth, screenX, width, height, floorY: half + (0.5 * lineScale) / depth });
+    }
+    if (!visible.length) return labels;
+
+    visible.sort((a, b) => a.depth - b.depth); // nearest first, for the budget
+    let budget = w * h * PAWN_FILL_BUDGET;
+    let count = 0;
+    while (count < visible.length && count < MAX_PAWNS) {
+      const v = visible[count];
+      budget -= Math.min(w, v.width) * Math.min(h, v.height);
+      if (budget < 0 && count > 0) break;
+      count++;
+    }
+    const drawList = visible.slice(0, count).reverse(); // paint far to near
+
+    for (const { p, depth, screenX, width, height, floorY } of drawList) {
       const top = floorY - height;
       const x0 = Math.max(0, Math.ceil(screenX - width / 2));
       const x1 = Math.min(w - 1, Math.floor(screenX + width / 2));
@@ -233,20 +263,25 @@ export class Renderer {
       const [cr, cg, cb] = p.finished ? FINISHED_COLOR : playerColor(p.id);
       // Pawns keep a floor of light so they stay readable down a dark corridor.
       const fog = Math.max(0.42, 1 - depth / FOG_DIST);
+      const ramp = colorRamp(cr, cg, cb, fog);
+      const left = screenX - width / 2;
+      const colStep = sprite.w / width;
+      const rowStep = sprite.h / height;
+      const shades = sprite.shades;
       let drawn = false;
 
       for (let x = x0; x <= x1; x++) {
         if (depth >= this.zbuf[x]) continue;
-        const sx = (((x - (screenX - width / 2)) * sprite.w) / width) | 0;
+        const sx = ((x - left) * colStep) | 0;
         if (sx < 0 || sx >= sprite.w) continue;
-        for (let y = y0; y <= y1; y++) {
-          const sy = (((y - top) * sprite.h) / height) | 0;
+        let texRow = (y0 - top) * rowStep;
+        let offset = y0 * w + x;
+        for (let y = y0; y <= y1; y++, texRow += rowStep, offset += w) {
+          const sy = texRow | 0;
           if (sy < 0 || sy >= sprite.h) continue;
-          const si = sy * sprite.w + sx;
-          if (!sprite.mask[si]) continue;
-          const shade = sprite.lum[si] * fog;
-          px[y * w + x] =
-            (0xff000000 | (((cb * shade) | 0) << 16) | (((cg * shade) | 0) << 8) | ((cr * shade) | 0)) >>> 0;
+          const shade = shades[sy * sprite.w + sx];
+          if (shade === 0) continue; // transparent
+          px[offset] = ramp[shade];
           drawn = true;
         }
       }
@@ -260,6 +295,11 @@ function clampLevel(level) {
   return level < 0 ? 0 : level > LEVELS - 1 ? LEVELS - 1 : level;
 }
 
+// The maze layer only changes when a new tile is discovered, so it is painted
+// into an offscreen canvas and blitted. Repainting 2601 tiles every frame cost
+// ~13 ms on a phone-class CPU all by itself.
+const mapCache = new WeakMap();
+
 export function drawMinimap(canvas, maze, cam, { visited = null, scale = 6, peers = [] } = {}) {
   const ctx = canvas.getContext("2d");
   const size = Math.min(canvas.width / maze.w, canvas.height / maze.h);
@@ -267,18 +307,34 @@ export function drawMinimap(canvas, maze, cam, { visited = null, scale = 6, peer
   const offX = (canvas.width - maze.w * s) / 2;
   const offY = (canvas.height - maze.h * s) / 2;
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  for (let y = 0; y < maze.h; y++) {
-    for (let x = 0; x < maze.w; x++) {
-      const tile = maze.grid[y * maze.w + x];
-      const known = !visited || visited.has(y * maze.w + x);
-      if (!known) continue;
-      if (tile === EXIT) ctx.fillStyle = "#7ebae4"; // the snowflake stays NixOS blue
-      else if (tile === EMPTY) ctx.fillStyle = "rgba(240,214,190,0.12)";
-      else ctx.fillStyle = "rgba(178,74,54,0.5)";
-      ctx.fillRect(offX + x * s, offY + y * s, s, s);
+  let cache = mapCache.get(canvas);
+  const known = visited ? visited.size : -1;
+  if (!cache || cache.seed !== maze.seed || cache.known !== known || cache.s !== s) {
+    if (!cache) {
+      cache = { layer: document.createElement("canvas") };
+      mapCache.set(canvas, cache);
+    }
+    cache.seed = maze.seed;
+    cache.known = known;
+    cache.s = s;
+    cache.layer.width = canvas.width;
+    cache.layer.height = canvas.height;
+    const lc = cache.layer.getContext("2d");
+    lc.clearRect(0, 0, canvas.width, canvas.height);
+    for (let y = 0; y < maze.h; y++) {
+      for (let x = 0; x < maze.w; x++) {
+        const tile = maze.grid[y * maze.w + x];
+        if (visited && !visited.has(y * maze.w + x)) continue;
+        if (tile === EXIT) lc.fillStyle = "#7ebae4"; // the snowflake stays NixOS blue
+        else if (tile === EMPTY) lc.fillStyle = "rgba(240,214,190,0.12)";
+        else lc.fillStyle = "rgba(178,74,54,0.5)";
+        lc.fillRect(offX + x * s, offY + y * s, s, s);
+      }
     }
   }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(cache.layer, 0, 0);
 
   for (const p of peers) {
     const [r, g, b] = playerColor(p.id);

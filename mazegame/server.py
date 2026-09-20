@@ -135,12 +135,11 @@ class MazeHandler(BaseHTTPRequestHandler):
         player = self.hub.add_player(sock, name)
         self.log_event(f"player {player.pid} {player.name} joined")
         try:
-            roster = self.hub.roster()
             sock.send(json.dumps({
                 "t": "welcome",
                 "id": player.pid,
                 "name": player.name,
-                "roster": roster,
+                "players": len(self.hub.players),
                 **self.hub.world(),
             }))
             while True:
@@ -165,7 +164,7 @@ class MazeHandler(BaseHTTPRequestHandler):
     def _watch_loop(self, sock: WebSocket, query: dict[str, list[str]]) -> None:
         watcher = self.hub.add_watcher(sock)
         self.log_event(f"watcher {watcher.wid} joined")
-        sock.send(json.dumps({"t": "roster", "players": self.hub.roster()}))
+
         try:
             while True:
                 raw = sock.recv()
@@ -192,6 +191,14 @@ class MazeHandler(BaseHTTPRequestHandler):
             print(f"[{time.strftime('%H:%M:%S')}] {fmt % args}", flush=True)
 
 
+class MazeServer(ThreadingHTTPServer):
+    # socketserver defaults to a listen backlog of 5, so a crowd arriving at
+    # once (a link going around) has its connections refused by the kernel
+    # before the accept loop ever sees them.
+    request_queue_size = 256
+    daemon_threads = True
+
+
 def serve(
     host: str = "127.0.0.1",
     port: int = 8080,
@@ -201,7 +208,7 @@ def serve(
     """Build a running server. Returns (httpd, hub); caller drives serve_forever."""
     hub = Hub(grace=grace) if grace is not None else Hub()
     handler = type("BoundMazeHandler", (MazeHandler,), {"hub": hub, "verbose": verbose})
-    httpd = ThreadingHTTPServer((host, port), handler)
+    httpd = MazeServer((host, port), handler)
     httpd.daemon_threads = True
 
     stop = threading.Event()

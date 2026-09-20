@@ -24,6 +24,10 @@ IDLE_SWITCH = 2.0  # seconds of stillness before a watcher moves on
 ROUND_GRACE = 120.0  # seconds between the first escape and the next maze
 MOVE_EPS = 0.015  # world units
 TURN_EPS = 0.015  # radians
+BUCKET = 8  # tiles per interest bucket edge
+PEER_LIMIT = 20  # neighbours sent per client
+PEER_INTERVAL = 0.05  # seconds between position snapshots
+PEER_BUSY = 60  # above this many players, halve the snapshot rate
 
 _ADJECTIVES = (
     "lost", "pure", "lazy", "eager", "hermetic", "sandboxed", "rolling",
@@ -87,12 +91,9 @@ class Hub:
         self.round_started = time.monotonic()
         self.deadline: float | None = None  # set by the first escape
         self.finishers: list[dict] = []  # this round's escapes, survives disconnects
+        self._peers_due = 0.0
 
     # -- the world ---------------------------------------------------------
-
-    def roster(self) -> list[dict]:
-        with self._lock:
-            return [{"id": p.pid, "name": p.name} for p in self.players.values()]
 
     def world(self) -> dict:
         """Everything a joining client needs to draw the current round."""
@@ -160,7 +161,6 @@ class Hub:
         with self._lock:
             player = Player(pid=next(self._ids), name=clean_name(name), conn=conn)
             self.players[player.pid] = player
-        self._broadcast_roster()
         return player
 
     def drop_player(self, player: Player) -> None:
@@ -171,7 +171,6 @@ class Hub:
                 watcher.target = None
         for watcher in orphaned:
             self._retarget(watcher, reason="gone")
-        self._broadcast_roster()
 
     def move_player(self, player: Player, x: float, y: float, a: float) -> bool:
         """Record a position. Returns True if it counts as movement."""
@@ -238,20 +237,65 @@ class Hub:
         self.broadcast_peers()
 
     def broadcast_peers(self) -> None:
-        """One positional snapshot for everyone; clients filter themselves out."""
+        """Positions, but only the neighbours each client can actually see.
+
+        Sending every player to every player is quadratic: 500 players meant a
+        10 KB frame fanned out 500 times, 20 times a second. Instead the map is
+        bucketed and one frame is built per occupied bucket, so the cost scales
+        with crowding, not with the square of the roster.
+        """
+        now = time.monotonic()
         with self._lock:
-            if not self.players and not self.watchers:
+            count = len(self.players)
+            if not count and not self.watchers:
                 return
-            frame = json.dumps({
-                "t": "peers",
-                "l": [
-                    [p.pid, round(p.x, 3), round(p.y, 3), round(p.a, 3),
-                     1 if p.finished_at is not None else 0]
-                    for p in self.players.values()
-                    if p.placed
-                ],
-            })
-        self._broadcast(frame)
+            interval = PEER_INTERVAL if count <= PEER_BUSY else PEER_INTERVAL * 2
+            if now < self._peers_due:
+                return
+            self._peers_due = now + interval
+
+            buckets: dict[tuple[int, int], list[Player]] = {}
+            for p in self.players.values():
+                if p.placed:
+                    buckets.setdefault((int(p.x // BUCKET), int(p.y // BUCKET)), []).append(p)
+
+            empty = json.dumps({"t": "peers", "n": count, "l": []})
+            cache: dict[tuple[int, int], str] = {}
+
+            def frame_for(key: tuple[int, int]) -> str:
+                hit = cache.get(key)
+                if hit is not None:
+                    return hit
+                bx, by = key
+                near: list[Player] = []
+                for oy in (-1, 0, 1):
+                    for ox in (-1, 0, 1):
+                        near.extend(buckets.get((bx + ox, by + oy), ()))
+                cx = (bx + 0.5) * BUCKET
+                cy = (by + 0.5) * BUCKET
+                near.sort(key=lambda q: (q.x - cx) ** 2 + (q.y - cy) ** 2)
+                # Names ride along, so clients never need a roster broadcast.
+                entries = [
+                    [q.pid, round(q.x, 3), round(q.y, 3), round(q.a, 3),
+                     1 if q.finished_at is not None else 0, q.name]
+                    for q in near[:PEER_LIMIT]
+                ]
+                built = json.dumps({"t": "peers", "n": count, "l": entries})
+                cache[key] = built
+                return built
+
+            sends = []
+            for p in self.players.values():
+                key = (int(p.x // BUCKET), int(p.y // BUCKET))
+                sends.append((p.conn, frame_for(key) if p.placed else empty))
+            for w in self.watchers.values():
+                target = self.players.get(w.target) if w.target else None
+                if target is None or not target.placed:
+                    continue
+                sends.append((w.conn, frame_for((int(target.x // BUCKET), int(target.y // BUCKET)))))
+
+        for conn, frame in sends:
+            conn.send(frame)
 
     # -- plumbing ----------------------------------------------------------
 
@@ -305,14 +349,6 @@ class Hub:
             conns += [w.conn for w in self.watchers.values()]
         for conn in conns:
             conn.send(frame)
-
-    def _broadcast_roster(self) -> None:
-        with self._lock:
-            frame = json.dumps({
-                "t": "roster",
-                "players": self.roster(),
-            })
-        self._broadcast(frame)
 
     def _notify_watched(self, *pids: int | None) -> None:
         """Let players know how many cameras are pointed at them."""
