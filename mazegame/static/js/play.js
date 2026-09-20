@@ -100,7 +100,7 @@ function connect(name) {
       } else if (msg.t === "world") {
         setMaze(msg.seed);
         state.endsAt = null;
-        note("new maze");
+        note(msg.winner ? `new maze · ${msg.winner} won the last one` : "new maze");
       } else if (msg.t === "roster") {
         applyRoster(msg.players);
       } else if (msg.t === "peers") {

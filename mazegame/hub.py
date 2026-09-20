@@ -86,6 +86,7 @@ class Hub:
         self.seed = new_seed()
         self.round_started = time.monotonic()
         self.deadline: float | None = None  # set by the first escape
+        self.finishers: list[dict] = []  # this round's escapes, survives disconnects
 
     # -- the world ---------------------------------------------------------
 
@@ -100,27 +101,13 @@ class Hub:
                 "seed": self.seed,
                 "ends_in": self._ends_in(),
                 "grace": self.grace,
-                "finishers": self._finishers(),
+                "finishers": list(self.finishers),
             }
 
     def _ends_in(self) -> float | None:
         if self.deadline is None:
             return None
         return max(0.0, round(self.deadline - time.monotonic(), 2))
-
-    def _finishers(self) -> list[dict]:
-        done = sorted(
-            (p for p in self.players.values() if p.finished_at is not None),
-            key=lambda p: p.finished_at,
-        )
-        return [
-            {
-                "name": p.name,
-                "place": p.place,
-                "secs": round(p.finished_at - self.round_started, 1),
-            }
-            for p in done
-        ]
 
     def record_finish(self, player: Player) -> None:
         """A player touched the logo. The first one starts the countdown."""
@@ -129,9 +116,14 @@ class Hub:
                 return  # already home; standing in the exit changes nothing
             now = time.monotonic()
             player.finished_at = now
-            player.place = 1 + sum(
-                1 for p in self.players.values() if p is not player and p.finished_at is not None
-            )
+            # The log belongs to the round, not to the connection: a winner who
+            # closes their tab must still be credited when the maze rolls over.
+            player.place = len(self.finishers) + 1
+            self.finishers.append({
+                "name": player.name,
+                "place": player.place,
+                "secs": round(now - self.round_started, 1),
+            })
             first = self.deadline is None
             if first:
                 self.deadline = now + self.grace
@@ -149,15 +141,17 @@ class Hub:
     def new_round(self) -> None:
         with self._lock:
             now = time.monotonic()
+            winner = self.finishers[0]["name"] if self.finishers else None
             self.seed = new_seed()
             self.round_started = now
             self.deadline = None
+            self.finishers = []
             for player in self.players.values():
                 player.finished_at = None
                 player.place = None
                 player.placed = False
                 player.last_move = now
-            frame = json.dumps({"t": "world", "seed": self.seed})
+            frame = json.dumps({"t": "world", "seed": self.seed, "winner": winner})
         self._broadcast(frame)
 
     # -- players -----------------------------------------------------------
@@ -341,7 +335,7 @@ class Hub:
                     "seed": self.seed,
                     "age": round(now - self.round_started, 1),
                     "ends_in": self._ends_in(),
-                    "finishers": self._finishers(),
+                    "finishers": list(self.finishers),
                 },
                 "players": [
                     {
