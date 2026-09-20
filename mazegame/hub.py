@@ -28,8 +28,8 @@ TURN_EPS = 0.015  # radians
 BUCKET = 8  # tiles per interest bucket edge
 PEER_LIMIT = 20  # neighbours sent per client
 PEER_INTERVAL = 0.05  # seconds between position snapshots
-PEER_BUSY = 60  # above this many players, halve the snapshot rate
-PEER_EXACT_MAX = 200  # above this, shortlist per bucket before per-client picks
+PEER_BUSY = 150  # above this many players, halve the snapshot rate
+PEER_EXACT_MAX = 120  # above this, shortlist per bucket before per-client picks
 PEER_SHORTLIST = 60  # candidates kept per bucket when crowded
 
 _ADJECTIVES = (
@@ -257,7 +257,9 @@ class Hub:
             interval = PEER_INTERVAL if count <= PEER_BUSY else PEER_INTERVAL * 2
             if now < self._peers_due:
                 return
-            self._peers_due = now + interval
+            # Stay on the cadence instead of drifting a whole tick every time
+            # the deadline lands just after a tick boundary.
+            self._peers_due = max(now, self._peers_due + interval)
 
             buckets: dict[tuple[int, int], list[Player]] = {}
             for p in self.players.values():
@@ -291,6 +293,23 @@ class Hub:
                     shortlists[(bx, by)] = hit
                 return hit
 
+            # A body serialises to the same JSON no matter who is looking at
+            # it, so encode each one once per tick and assemble frames by
+            # joining strings. json.dumps per client is what caps the tick
+            # rate once a couple of hundred people are connected.
+            prefix = '{"t":"peers","n":%d,"l":[' % count
+            encoded: dict[int, str] = {}
+
+            def entry(q: Player) -> str:
+                hit = encoded.get(q.pid)
+                if hit is None:
+                    hit = json.dumps([
+                        q.pid, round(q.x, 3), round(q.y, 3), round(q.a, 3),
+                        1 if q.finished_at is not None else 0, q.name,
+                    ])
+                    encoded[q.pid] = hit
+                return hit
+
             def frame_around(x: float, y: float, skip: int | None, exact: bool = False) -> str:
                 pool = candidates(int(x // BUCKET), int(y // BUCKET), exact)
                 near = heapq.nsmallest(
@@ -299,12 +318,7 @@ class Hub:
                     key=lambda q: (q.x - x) ** 2 + (q.y - y) ** 2,
                 )
                 # Names ride along, so clients never need a roster broadcast.
-                entries = [
-                    [q.pid, round(q.x, 3), round(q.y, 3), round(q.a, 3),
-                     1 if q.finished_at is not None else 0, q.name]
-                    for q in near
-                ]
-                return json.dumps({"t": "peers", "n": count, "l": entries})
+                return prefix + ",".join([entry(q) for q in near]) + "]}"
 
             sends = []
             for p in self.players.values():

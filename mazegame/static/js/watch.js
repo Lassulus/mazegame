@@ -3,13 +3,13 @@
 
 import { buildMaze } from "./maze.js";
 import { Renderer, retroPixel } from "./render.js";
+import { makeTrack, pushSample, sampleTrack, wrapAngle } from "./interp.js";
 import { createSocket } from "./net.js";
 import { createTags } from "./tags.js";
 import { isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
 const IDLE_LIMIT = 2000; // must match hub.IDLE_SWITCH
-const SMOOTH = 16; // camera catch-up rate
 
 const view = document.getElementById("view");
 const elName = document.getElementById("target");
@@ -26,7 +26,7 @@ const renderer = new Renderer(view, { pixel: retroPixel() });
 const state = {
   maze: null,
   cam: { x: 1.5, y: 1.5, a: 0 },
-  want: { x: 1.5, y: 1.5, a: 0 },
+  camTrack: makeTrack(),
   lastPos: { x: 0, y: 0, a: 0 },
   target: null,
   lastMove: performance.now(),
@@ -68,8 +68,11 @@ const socket = createSocket("/ws/watch", {
       state.target = { id: msg.id, name: msg.name };
       state.maze = buildMaze(msg.seed >>> 0);
       const spawn = msg.placed ? { x: msg.x, y: msg.y, a: msg.a } : state.maze.start;
-      state.want = { ...spawn };
+      // A cut is a hard jump, not a glide: start a fresh track on the new body.
+      state.camTrack = makeTrack(spawn.x, spawn.y, spawn.a);
       state.cam = { ...spawn };
+      state.lastPos = { ...spawn };
+      state.peers.clear();
       state.lastMove = performance.now();
       state.players = msg.players;
       state.endsAt = msg.ends_in === null ? null : performance.now() + msg.ends_in * 1000;
@@ -104,27 +107,47 @@ const socket = createSocket("/ws/watch", {
   },
 });
 
-// The camera rides the watched player; everyone else is drawn as a pawn.
+// The camera rides the watched player; everyone else is drawn as a pawn. Both
+// are interpolated, so a 10 Hz feed still plays back as smooth motion.
 function applyPeers(msg) {
   state.players = msg.n;
   elPlayers.textContent = msg.n;
+  const now = performance.now();
   const seen = new Set();
   for (const [id, x, y, a, finished, name] of msg.l) {
     if (name) state.names.set(id, name);
     if (state.target && id === state.target.id) {
-      state.want = { x, y, a };
       const moved =
         Math.abs(x - state.lastPos.x) > 0.015 ||
         Math.abs(y - state.lastPos.y) > 0.015 ||
-        Math.abs(wrap(a - state.lastPos.a)) > 0.015;
-      if (moved) state.lastMove = performance.now();
+        Math.abs(wrapAngle(a - state.lastPos.a)) > 0.015;
+      if (moved) state.lastMove = now;
       state.lastPos = { x, y, a };
+      pushSample(state.camTrack, x, y, a, now);
       continue;
     }
     seen.add(id);
-    state.peers.set(id, { id, x, y, a, finished: !!finished });
+    let peer = state.peers.get(id);
+    if (!peer) {
+      peer = { id, track: makeTrack(x, y, a), x, y, a, finished: !!finished };
+      state.peers.set(id, peer);
+    }
+    peer.finished = !!finished;
+    pushSample(peer.track, x, y, a, now);
   }
   for (const id of [...state.peers.keys()]) if (!seen.has(id)) state.peers.delete(id);
+}
+
+function livePeers(now) {
+  const out = [];
+  for (const peer of state.peers.values()) {
+    const at = sampleTrack(peer.track, now);
+    peer.x = at.x;
+    peer.y = at.y;
+    peer.a = at.a;
+    out.push(peer);
+  }
+  return out;
 }
 
 addEventListener("keydown", (e) => {
@@ -146,9 +169,7 @@ function clock(secs) {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
-function wrap(angle) {
-  return ((angle + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
-}
+
 
 const drawTags = createTags(document.getElementById("labels"));
 
@@ -158,11 +179,8 @@ function frame(now) {
   last = now;
 
   if (state.maze) {
-    const k = 1 - Math.exp(-dt * SMOOTH);
-    state.cam.x += (state.want.x - state.cam.x) * k;
-    state.cam.y += (state.want.y - state.cam.y) * k;
-    state.cam.a += wrap(state.want.a - state.cam.a) * k;
-    const peers = [...state.peers.values()];
+    state.cam = sampleTrack(state.camTrack, now);
+    const peers = livePeers(now);
     const labels = renderer.draw(state.maze, state.cam, peers) || [];
     drawTags(labels, state.names, view.clientWidth / renderer.w || 1);
     // No minimap here on purpose: a spectator should be as lost as the player.

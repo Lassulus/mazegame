@@ -119,9 +119,23 @@ Everything here is measured with synthetic clients against one process:
 
 - **Interest management.** Sending every position to every player is
   quadratic: at 560 players that was a 10 KB frame fanned out 560 times, 20
-  times a second — 114 MB/s. The map is bucketed (`BUCKET` = 8 tiles) and one
-  frame is built per occupied bucket with the nearest `PEER_LIMIT` (20)
-  neighbours, names inline. 1000 players now cost under 1 MB/s.
+  times a second — 114 MB/s. A bucket index (`BUCKET` = 8 tiles) bounds the
+  candidate set and each client gets the `PEER_LIMIT` (20) nearest bodies
+  **centred on itself**, names inline. Above `PEER_EXACT_MAX` players the
+  candidates are shortlisted per bucket first. A spectator's list is always
+  built exactly around its target: a shared per-bucket list drops whoever is
+  furthest from the bucket's middle, which in a crowd is precisely the player
+  the camera is following, and the view freezes.
+- **One encode per body.** A body serialises identically for every viewer, so
+  each is `json.dumps`-ed once per tick and frames are assembled by joining
+  strings. This alone took 200 players from 4.8 Hz to 9.8 Hz.
+- **Tick cadence.** The hub thread sleeps the *remainder* of its period. A
+  fixed 50 ms sleep plus 30 ms of work silently halves the update rate.
+- **Interpolation.** Snapshots arrive 10-20 times a second, frames are drawn
+  60 times a second. `interp.js` glides every remote body (and the spectator
+  camera) between the last two samples. Measured on the camera with 100
+  players: snapping moved in 13 of 149 frames with jumps up to 0.16 tiles;
+  interpolated moves in 145 of 149, biggest step 0.017.
 - **No roster broadcast.** It was a 14 KB frame to everyone on every join —
   8 MB of traffic per player arriving. Names ride along in the peer entries
   instead, so a client learns a name exactly when it can see its owner.
@@ -130,14 +144,18 @@ Everything here is measured with synthetic clients against one process:
   `request_queue_size = 256`.
 - **Limits.** One socket and one thread per player, so the unit sets
   `LimitNOFILE = 65536` and `TasksMax = 8192`; systemd's default of 1024 file
-  descriptors otherwise caps the server at about a thousand players.
+  descriptors otherwise caps the server at about a thousand players. nginx
+  needs raising too — its default single worker with 512 connections caps you
+  at ~250 players, since a proxied websocket costs two connections.
 - **Client fill budget.** A crowd standing in one room used to cost several
   full-screen sprite fills per frame. The renderer draws the nearest pawns
   within `PAWN_FILL_BUDGET` screenfuls (`MAX_PAWNS` cap), and the minimap's
   static layer is cached instead of repainting 2601 tiles every frame.
 
-Measured ceiling on one core: **1000 players, zero refused connections, ~76 %
-CPU, 64 MB RSS**, page still served in 3 ms.
+Measured on one core with every player piled into the same room (the worst
+case for interest management): **100 players at 19.3 Hz, 200 at 9.8 Hz, 1000
+connected with zero refused connections**, ~76 % CPU, 64 MB RSS, page served
+in 3 ms throughout.
 
 ## Maze shape
 

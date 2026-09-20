@@ -218,7 +218,17 @@ def serve(
         # This thread owns peer snapshots, watcher switching and the round
         # rollover. If it ever dies the world silently freezes for everyone,
         # so no single bad connection may take it down.
-        while not stop.wait(1.0 / TICK_HZ):
+        period = 1.0 / TICK_HZ
+        next_at = time.monotonic() + period
+        while True:
+            # Sleep the remainder of the period, not a whole one: with a full
+            # room the work itself takes tens of milliseconds and a fixed
+            # sleep silently halves the update rate.
+            if stop.wait(max(0.0, next_at - time.monotonic())):
+                return
+            next_at += period
+            if next_at < time.monotonic():
+                next_at = time.monotonic() + period  # fell behind; resync
             try:
                 hub.tick()
             except Exception:

@@ -5,6 +5,7 @@ import { WIN_DWELL, buildMaze, solid } from "./maze.js";
 import { Renderer, drawMinimap, retroPixel } from "./render.js";
 import { createSocket } from "./net.js";
 import { createTags } from "./tags.js";
+import { makeTrack, pushSample, sampleTrack } from "./interp.js";
 import { createTouchControls, isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
@@ -125,14 +126,35 @@ function applyWorld(world) {
 // each one shows up, so there is no roster broadcast to fan out.
 function applyPeers(msg) {
   elPlayers.textContent = msg.n;
+  const now = performance.now();
   const seen = new Set();
   for (const [id, x, y, a, finished, name] of msg.l) {
     if (name) state.names.set(id, name);
     if (id === state.id) continue; // that one is us
     seen.add(id);
-    state.peers.set(id, { id, x, y, a, finished: !!finished });
+    let peer = state.peers.get(id);
+    if (!peer) {
+      peer = { id, track: makeTrack(x, y, a), x, y, a, finished: !!finished };
+      state.peers.set(id, peer);
+    }
+    peer.finished = !!finished;
+    pushSample(peer.track, x, y, a, now);
   }
   for (const id of [...state.peers.keys()]) if (!seen.has(id)) state.peers.delete(id);
+}
+
+// Bodies are drawn where interpolation says they are right now, not where the
+// last snapshot left them.
+function livePeers(now) {
+  const out = [];
+  for (const peer of state.peers.values()) {
+    const at = sampleTrack(peer.track, now);
+    peer.x = at.x;
+    peer.y = at.y;
+    peer.a = at.a;
+    out.push(peer);
+  }
+  return out;
 }
 
 function ordinal(place) {
@@ -276,7 +298,7 @@ function frame(now) {
   last = now;
   step(dt);
   if (state.maze) {
-    const peers = [...state.peers.values()];
+    const peers = livePeers(now);
     const labels = renderer.draw(state.maze, state.cam, peers) || [];
     drawTags(labels, state.names, view.clientWidth / renderer.w || 1);
     drawMinimap(minimap, state.maze, state.cam, { visited, scale: 4, peers });
