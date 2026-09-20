@@ -187,11 +187,6 @@ kbd {
   image-rendering: pixelated;
 }
 
-body.watch .minimap {
-  width: 130px;
-  height: 130px;
-}
-
 .watched {
   position: fixed;
   left: 14px;
@@ -622,8 +617,7 @@ body.touch .keys-only {
     padding: 2px 6px;
   }
 
-  .minimap,
-  body.watch .minimap {
+  .minimap {
     width: 96px;
     height: 96px;
     top: 46px;

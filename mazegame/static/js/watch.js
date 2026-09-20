@@ -2,7 +2,7 @@
 // player when the current one stops moving for two seconds.
 
 import { buildMaze } from "./maze.js";
-import { Renderer, drawMinimap, retroPixel } from "./render.js";
+import { Renderer, retroPixel } from "./render.js";
 import { createSocket } from "./net.js";
 import { createTags } from "./tags.js";
 import { isTouch, wireFullscreen } from "./touch.js";
@@ -12,7 +12,6 @@ const IDLE_LIMIT = 2000; // must match hub.IDLE_SWITCH
 const SMOOTH = 16; // camera catch-up rate
 
 const view = document.getElementById("view");
-const minimap = document.getElementById("minimap");
 const elName = document.getElementById("target");
 const elPlayers = document.getElementById("players");
 const elIdleBar = document.getElementById("idlebar");
@@ -167,7 +166,7 @@ function frame(now) {
     const peers = [...state.peers.values()];
     const labels = renderer.draw(state.maze, state.cam, peers) || [];
     drawTags(labels, state.names, view.clientWidth / renderer.w || 1);
-    drawMinimap(minimap, state.maze, state.cam, { scale: 4, peers });
+    // No minimap here on purpose: a spectator should be as lost as the player.
     elRound.textContent = state.endsAt === null ? "open" : clock((state.endsAt - now) / 1000);
 
     const idle = now - state.lastMove;
