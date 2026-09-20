@@ -105,10 +105,16 @@ geometry from it with the same PRNG, so only positions cross the wire. When a
 player reaches the exit the server records their place and time, broadcasts it,
 and — for the first finisher only — arms a `ROUND_GRACE` (120 s) timer. Anyone
 still walking keeps playing and can still finish 2nd, 3rd, … When the timer
-expires every client gets `{"t":"world","seed":…}` and respawns on the shared
-spawn tile, jittered so pawns do not stack.
+expires every client gets `{"t":"world","seed":…}` and respawns.
 
-Positions go out at 20 Hz (10 Hz above 60 players), but each client only gets
+Spawns are scattered: `spawnFor(maze, id)` picks a cell from the maze's spawn
+pool with a PRNG seeded on the maze **and** the player id, so a hundred
+players land on ~70 distinct cells up to 60 tiles apart. The pool only holds
+cells at least `SPAWN_BAND` (75 %) of the longest walk away from the logo, so
+scattering does not also hand out unequal races — measured across seeds, every
+spawn is 68-94 tiles from the exit where the longest possible is 90-96.
+
+Positions go out at 20 Hz (10 Hz above 150 players), but each client only gets
 the neighbours around it, not the whole roster — see Scaling. Pawns are
 billboards depth-tested against the wall pass, so a player behind a wall is
 genuinely hidden rather than drawn on top.

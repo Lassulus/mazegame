@@ -1,7 +1,7 @@
 // Player view: everyone walks the same maze, sees each other, and races the
 // countdown that starts when the first player reaches the NixOS logo.
 
-import { WIN_DWELL, buildMaze, solid } from "./maze.js";
+import { WIN_DWELL, buildMaze, solid, spawnFor } from "./maze.js";
 import { Renderer, drawMinimap, retroPixel } from "./render.js";
 import { createSocket } from "./net.js";
 import { createTags } from "./tags.js";
@@ -53,12 +53,14 @@ window.mazegame = state; // handy for the console and for smoke tests
 
 function setMaze(seed) {
   state.maze = buildMaze(pinnedSeed ?? seed >>> 0);
-  // Everyone starts on the same tile, jittered so pawns do not stack.
+  // Own corner of the map, jittered so two players sharing one never stack.
+  const spawn = spawnFor(state.maze, state.id);
   state.cam = {
-    x: state.maze.start.x + (Math.random() - 0.5) * 0.5,
-    y: state.maze.start.y + (Math.random() - 0.5) * 0.5,
-    a: state.maze.start.a,
+    x: spawn.x + (Math.random() - 0.5) * 0.5,
+    y: spawn.y + (Math.random() - 0.5) * 0.5,
+    a: spawn.a,
   };
+  state.spawnDist = spawn.dist;
   state.startedAt = performance.now();
   state.won = false;
   visited.clear();
@@ -275,7 +277,7 @@ function win() {
   state.wonAt = performance.now();
   const secs = (state.wonAt - state.startedAt) / 1000;
   showOverlay(
-    `<strong>ESCAPED</strong><br>${secs.toFixed(1)}s · ${state.maze.length} tiles of corridor` +
+    `<strong>ESCAPED</strong><br>${secs.toFixed(1)}s · ${state.spawnDist} tiles from your spawn` +
       `<br><small>keep wandering — the maze changes when the countdown ends</small>`,
     "won",
   );

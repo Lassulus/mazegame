@@ -16,6 +16,9 @@ export const WIN_DWELL = 2600;
 // junctions, and how many extra walls are punched out to create loops.
 const BRAID = 0.7;
 const EXTRA_LOOPS = 0.06;
+// Spawns must be at least this fraction of the longest walk away from the
+// exit, so scattering players does not also hand out unequal races.
+const SPAWN_BAND = 0.75;
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -133,22 +136,58 @@ export function buildMaze(seed, cells = CELLS) {
   const exitX = best.tx - best.open[0];
   const exitY = best.ty - best.open[1];
   grid[at(exitX, exitY)] = EXIT;
-  const length = best.d;
 
-  // Face the spawn down an open corridor.
-  const look = DIRS.find(([dx, dy]) => grid[at(startTX + dx, startTY + dy)] === EMPTY) || [1, 0];
+  // Spawns are scattered, but only over cells that are a comparable walk from
+  // the logo: a purely random spawn hands one player a ten-tile stroll and the
+  // next a seventy-tile trek, which is no way to run a race.
+  const fromExit = bfs(grid, w, h, best.tx, best.ty);
+  let longest = 0;
+  for (let cy = 0; cy < cells; cy++) {
+    for (let cx = 0; cx < cells; cx++) {
+      const d = fromExit[at(cx * 2 + 1, cy * 2 + 1)];
+      if (d > longest) longest = d;
+    }
+  }
+  const floor = Math.max(1, Math.floor(longest * SPAWN_BAND));
+  const spawns = [];
+  for (let cy = 0; cy < cells; cy++) {
+    for (let cx = 0; cx < cells; cx++) {
+      const tx = cx * 2 + 1;
+      const ty = cy * 2 + 1;
+      const d = fromExit[at(tx, ty)];
+      if (d < floor) continue;
+      const look = DIRS.find(([dx, dy]) => grid[at(tx + dx, ty + dy)] === EMPTY) || [1, 0];
+      spawns.push({ x: tx + 0.5, y: ty + 0.5, a: Math.atan2(look[1], look[0]), dist: d });
+    }
+  }
+  if (!spawns.length) {
+    const look = DIRS.find(([dx, dy]) => grid[at(startTX + dx, startTY + dy)] === EMPTY) || [1, 0];
+    spawns.push({
+      x: startTX + 0.5, y: startTY + 0.5,
+      a: Math.atan2(look[1], look[0]), dist: dist[at(best.tx, best.ty)],
+    });
+  }
+  spawns.sort((p, q) => q.dist - p.dist);
 
   return {
     seed,
     w,
     h,
     grid,
-    start: { x: startTX + 0.5, y: startTY + 0.5, a: Math.atan2(look[1], look[0]) },
+    spawns,
+    // The furthest spawn, used when a client has no identity of its own yet.
+    start: spawns[0],
     exit: { x: exitX + 0.5, y: exitY + 0.5, face: [-best.open[0], -best.open[1]] },
     // Standing here means you touched the logo.
     exitApproach: { x: best.tx + 0.5, y: best.ty + 0.5 },
-    length,
+    length: longest,
   };
+}
+
+/** Deterministic per-player spawn: same maze, different corner each. */
+export function spawnFor(maze, id) {
+  const rnd = mulberry32((maze.seed ^ Math.imul(id || 1, 0x9e3779b1)) >>> 0);
+  return maze.spawns[(rnd() * maze.spawns.length) | 0];
 }
 
 function bfs(grid, w, h, sx, sy) {
