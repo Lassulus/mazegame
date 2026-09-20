@@ -79,7 +79,8 @@ running service, so the unit is verified rather than assumed.
 
 | key | action |
 | --- | --- |
-| `W` `A` `S` `D` / arrows | move and turn |
+| `W` `A` `S` `D` | walk and strafe |
+| `Q` `E` / `←` `→` | turn |
 | mouse (click to capture) | look |
 | `shift` | run |
 | `esc` | release the mouse |

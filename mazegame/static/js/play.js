@@ -254,10 +254,8 @@ function step(dt) {
   if (keys.has("KeyS") || keys.has("ArrowDown")) forward -= 1;
   if (keys.has("KeyD")) strafe += 1;
   if (keys.has("KeyA")) strafe -= 1;
-  if (keys.has("KeyE")) strafe += 1;
-  if (keys.has("KeyQ")) strafe -= 1;
-  if (keys.has("ArrowLeft")) cam.a -= TURN * dt;
-  if (keys.has("ArrowRight")) cam.a += TURN * dt;
+  if (keys.has("ArrowLeft") || keys.has("KeyQ")) cam.a -= TURN * dt;
+  if (keys.has("ArrowRight") || keys.has("KeyE")) cam.a += TURN * dt;
   cam.a += touch.steer * TURN * dt;
 
   const mag = Math.hypot(forward, strafe);
