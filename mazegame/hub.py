@@ -39,7 +39,7 @@ _ADJECTIVES = (
 )
 _NOUNS = (
     "wanderer", "derivation", "snowflake", "closure", "hydra", "gnome",
-    "rebuilder", "flake", "hopper", "mole", "spelunker", "daemon",
+    "rebuilder", "flake", "hopper", "linker", "spelunker", "daemon",
 )
 
 
