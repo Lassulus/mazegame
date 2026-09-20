@@ -21,20 +21,26 @@
 
       mkMazegame =
         pkgs:
-        pkgs.python3Packages.buildPythonApplication {
-          pname = "mazegame";
-          inherit version;
-          pyproject = true;
-          src = ./.;
-          build-system = [ pkgs.python3Packages.setuptools ];
-          doCheck = false;
-          meta = {
-            description = "Browser maze game with a spectator camera; the exit is the NixOS logo";
-            mainProgram = "mazegame";
-            license = pkgs.lib.licenses.mit;
-            platforms = pkgs.lib.platforms.all;
+        let
+          package = pkgs.python3Packages.buildPythonApplication {
+            pname = "mazegame";
+            inherit version;
+            pyproject = true;
+            src = ./.;
+            build-system = [ pkgs.python3Packages.setuptools ];
+            doCheck = false;
+            # The site as installed, so a web server can hand out the client
+            # straight from the store and leave the event loop to the game.
+            passthru.static = "${package}/${pkgs.python3.sitePackages}/mazegame/static";
+            meta = {
+              description = "Browser maze game with a spectator camera; the exit is the NixOS logo";
+              mainProgram = "mazegame";
+              license = pkgs.lib.licenses.mit;
+              platforms = pkgs.lib.platforms.all;
+            };
           };
-        };
+        in
+        package;
 
       mazegameModule =
         {

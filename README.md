@@ -67,9 +67,34 @@ so there is nothing to back up or migrate.
 | `services.mazegame.roundGrace` | int | `120` | seconds from first escape to the next maze |
 | `services.mazegame.openFirewall` | bool | `false` | open the port |
 
-Behind nginx, proxy `/` to the port and pass the WebSocket upgrade headers
-(`proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`)
-or `/ws/play` and `/ws/watch` will fail to connect.
+Behind nginx, proxy `/ws/` and `/api/` to the port and pass the WebSocket
+upgrade headers (`proxy_set_header Upgrade $http_upgrade; proxy_set_header
+Connection "upgrade";`) or `/ws/play` and `/ws/watch` will fail to connect.
+
+Hand the client itself to nginx rather than the game: the package exposes the
+installed site as `pkgs.mazegame.static`, so the event loop never spends a
+tick on a `.js` file. A crowd arriving costs six files each, and nginx serves
+them roughly four times faster than the server does.
+
+```nix
+services.nginx.virtualHosts."maze.example.org" = {
+  root = config.services.mazegame.package.static;
+  locations."/" = {
+    index = "index.html";
+    tryFiles = "$uri $uri/ =404";
+  };
+  locations."= /watch".tryFiles = "/watch.html =404";
+  locations."/ws/" = {
+    proxyPass = "http://127.0.0.1:8080";
+    proxyWebsockets = true;
+    extraConfig = "proxy_read_timeout 1h;";
+  };
+  locations."/api/".proxyPass = "http://127.0.0.1:8080";
+};
+```
+
+The server still serves the same files itself, so `python -m mazegame` alone
+is a complete game — the split only matters under load.
 
 `overlays.default` exposes `pkgs.mazegame` if you would rather wire the package
 up yourself. `nix flake check` boots a VM, enables the module and talks to the
