@@ -234,7 +234,7 @@ function step(dt) {
   if (keys.has("KeyQ")) strafe -= 1;
   if (keys.has("ArrowLeft")) cam.a -= TURN * dt;
   if (keys.has("ArrowRight")) cam.a += TURN * dt;
-  cam.a += touch.takeTurn() + touch.steer * TURN * dt;
+  cam.a += touch.steer * TURN * dt;
 
   const mag = Math.hypot(forward, strafe);
   if (mag > 0.02) {

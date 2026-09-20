@@ -12,6 +12,11 @@ export const CELLS = 25;
 // over when the server says so (2 minutes after the first escape).
 export const WIN_DWELL = 2600;
 
+// Tuning for how maze-y the maze is: how many dead ends get sealed into
+// junctions, and how many extra walls are punched out to create loops.
+const BRAID = 0.7;
+const EXTRA_LOOPS = 0.06;
+
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
@@ -36,59 +41,99 @@ export function buildMaze(seed, cells = CELLS) {
   const grid = new Uint8Array(w * h).fill(WALL);
   const at = (x, y) => y * w + x;
 
-  // Recursive backtracker (the classic "perfect maze" carve).
+  // Randomized Prim's: grows the tree from a random frontier wall each step,
+  // which forks constantly instead of snaking like a backtracker does.
   const startCX = (rnd() * cells) | 0;
   const startCY = (rnd() * cells) | 0;
   const seen = new Uint8Array(cells * cells);
-  const stack = [[startCX, startCY]];
-  seen[startCY * cells + startCX] = 1;
-  grid[at(startCX * 2 + 1, startCY * 2 + 1)] = EMPTY;
+  const frontier = []; // [cellX, cellY, fromX, fromY]
 
-  while (stack.length) {
-    const [cx, cy] = stack[stack.length - 1];
-    const open = [];
+  const visit = (cx, cy) => {
+    seen[cy * cells + cx] = 1;
+    grid[at(cx * 2 + 1, cy * 2 + 1)] = EMPTY;
     for (const [dx, dy] of DIRS) {
       const nx = cx + dx;
       const ny = cy + dy;
       if (nx < 0 || ny < 0 || nx >= cells || ny >= cells) continue;
       if (seen[ny * cells + nx]) continue;
-      open.push([nx, ny, dx, dy]);
+      frontier.push([nx, ny, cx, cy]);
     }
-    if (!open.length) {
-      stack.pop();
-      continue;
-    }
-    const [nx, ny, dx, dy] = open[(rnd() * open.length) | 0];
-    grid[at(cx * 2 + 1 + dx, cy * 2 + 1 + dy)] = EMPTY;
-    grid[at(nx * 2 + 1, ny * 2 + 1)] = EMPTY;
-    seen[ny * cells + nx] = 1;
-    stack.push([nx, ny]);
+  };
+
+  visit(startCX, startCY);
+  while (frontier.length) {
+    const pick = (rnd() * frontier.length) | 0;
+    const [cx, cy, fromX, fromY] = frontier[pick];
+    frontier[pick] = frontier[frontier.length - 1];
+    frontier.pop();
+    if (seen[cy * cells + cx]) continue;
+    grid[at(fromX + cx + 1, fromY + cy + 1)] = EMPTY; // the wall between them
+    visit(cx, cy);
   }
 
   const startTX = startCX * 2 + 1;
   const startTY = startCY * 2 + 1;
-  const dist = bfs(grid, w, h, startTX, startTY);
 
-  // The exit is the wall capping the dead end furthest from the spawn, so the
-  // logo always faces you down a corridor.
-  let best = null;
+  // A perfect maze is a tree: one route anywhere, every wrong turn a dead end.
+  // Braid most dead ends shut and punch extra holes, so the place has real
+  // junctions, shortcuts and loops instead of one long snake.
+  const isInnerWall = (x, y) =>
+    x > 0 && y > 0 && x < w - 1 && y < h - 1 && grid[at(x, y)] === WALL;
+
   for (let cy = 0; cy < cells; cy++) {
     for (let cx = 0; cx < cells; cx++) {
       const tx = cx * 2 + 1;
       const ty = cy * 2 + 1;
-      if (tx === startTX && ty === startTY) continue;
+      const open = DIRS.filter(([dx, dy]) => grid[at(tx + dx, ty + dy)] === EMPTY);
+      if (open.length !== 1 || rnd() > BRAID) continue;
+      const options = DIRS.filter(([dx, dy]) => isInnerWall(tx + dx, ty + dy));
+      if (options.length) {
+        const [dx, dy] = options[(rnd() * options.length) | 0];
+        grid[at(tx + dx, ty + dy)] = EMPTY;
+      }
+    }
+  }
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      if (x % 2 === y % 2) continue; // cells and pillars, not walls between cells
+      if (!isInnerWall(x, y) || rnd() > EXTRA_LOOPS) continue;
+      grid[at(x, y)] = EMPTY;
+    }
+  }
+
+  // Pick the exit from the braided layout, so the walk there is the real
+  // shortest route and not a tree distance the shortcuts already undercut.
+  const dist = bfs(grid, w, h, startTX, startTY);
+  let best = null;
+  let farthest = null;
+  for (let cy = 0; cy < cells; cy++) {
+    for (let cx = 0; cx < cells; cx++) {
+      const tx = cx * 2 + 1;
+      const ty = cy * 2 + 1;
+      const d = dist[at(tx, ty)];
+      if (d < 0 || (tx === startTX && ty === startTY)) continue;
+      if (!farthest || d > farthest.d) farthest = { tx, ty, d };
       const exits = DIRS.filter(([dx, dy]) => grid[at(tx + dx, ty + dy)] === EMPTY);
       if (exits.length !== 1) continue;
-      const d = dist[at(tx, ty)];
-      if (d < 0) continue;
       if (!best || d > best.d) best = { tx, ty, d, open: exits[0] };
     }
   }
-  if (!best) best = { tx: startTX, ty: startTY, d: 0, open: [0, -1] };
+  if (!best) {
+    // Fully braided away: wall off the furthest cell until it is a dead end.
+    const { tx, ty, d } = farthest || { tx: startTX, ty: startTY, d: 0 };
+    const exits = DIRS.filter(([dx, dy]) => grid[at(tx + dx, ty + dy)] === EMPTY);
+    const keep = exits[0] || [0, -1];
+    for (const [dx, dy] of exits) {
+      if (dx !== keep[0] || dy !== keep[1]) grid[at(tx + dx, ty + dy)] = WALL;
+    }
+    best = { tx, ty, d, open: keep };
+  }
 
   const exitX = best.tx - best.open[0];
   const exitY = best.ty - best.open[1];
   grid[at(exitX, exitY)] = EXIT;
+  const length = best.d;
 
   // Face the spawn down an open corridor.
   const look = DIRS.find(([dx, dy]) => grid[at(startTX + dx, startTY + dy)] === EMPTY) || [1, 0];
@@ -102,7 +147,7 @@ export function buildMaze(seed, cells = CELLS) {
     exit: { x: exitX + 0.5, y: exitY + 0.5, face: [-best.open[0], -best.open[1]] },
     // Standing here means you touched the logo.
     exitApproach: { x: best.tx + 0.5, y: best.ty + 0.5 },
-    length: best.d,
+    length,
   };
 }
 

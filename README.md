@@ -90,10 +90,10 @@ card entirely, which is what shared links and kiosks want.
 
 Watcher page: `space` / `N` skips to the next player, `F` goes fullscreen.
 
-On a phone the left half of the screen is a floating stick: push up/down to
-walk, sideways to turn, all the way forward to run. One thumb is enough;
-dragging on the right half also turns if you prefer two. A fullscreen button
-sits above the bottom bar, and the watcher page switches players on any tap.
+On a phone the whole screen is one floating stick: put a thumb down anywhere,
+push up/down to walk, sideways to turn, all the way forward to run. A
+fullscreen button sits above the bottom bar, and the watcher page switches
+players on any tap.
 
 `/?seed=12345` pins a maze locally for testing; it detaches you from the shared
 world, so use it for screenshots rather than racing.
@@ -112,6 +112,20 @@ Positions go out as one `peers` snapshot at 20 Hz to every player *and* every
 watcher, so a spectator sees the other wanderers too. Pawns are billboards
 depth-tested against the wall pass, so a player behind a wall is genuinely
 hidden rather than drawn on top.
+
+## Maze shape
+
+`maze.js` carves with randomized **Prim's** rather than a recursive
+backtracker: Prim grows from a random frontier edge every step, so the layout
+forks constantly instead of snaking down one long corridor.
+
+A carved maze is still a tree — one route everywhere, every wrong turn a dead
+end. Two passes fix that: `BRAID` (0.7) seals most dead ends by knocking a
+second wall out of them, and `EXTRA_LOOPS` (0.06) punches random holes in the
+remaining walls. A 25x25 maze then measures roughly 270 junctions, 145
+independent loops and only ~35 dead ends, with the logo capping the dead end
+furthest from the spawn *after* braiding — otherwise the shortcuts would
+undercut the walk the exit was chosen for.
 
 ## How the watcher picks a player
 
