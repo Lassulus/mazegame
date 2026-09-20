@@ -111,6 +111,12 @@ and — for the first finisher only — arms a `ROUND_GRACE` (120 s) timer. Anyo
 still walking keeps playing and can still finish 2nd, 3rd, … When the timer
 expires every client gets `{"t":"world","seed":…}` and respawns.
 
+Reaching the logo does not park you there: the escape card holds you still for
+`WIN_DWELL`, then you are dropped back into the maze at a different spawn so
+there is still something to do while the countdown runs. Your place and time
+are already banked — `finished` stays set, so the exit does nothing until the
+world rolls over, and your pawn shows NixOS blue to everyone still looking.
+
 Spawns are scattered: `spawnFor(maze, id)` picks a cell from the maze's spawn
 pool with a PRNG seeded on the maze **and** the player id, so a hundred
 players land on ~70 distinct cells up to 60 tiles apart. The pool only holds

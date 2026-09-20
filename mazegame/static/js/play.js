@@ -41,7 +41,9 @@ const pinnedSeed = params.has("seed") ? Number(params.get("seed")) >>> 0 : null;
 const state = {
   maze: null,
   cam: { x: 1.5, y: 1.5, a: 0 },
-  won: false, // reached the logo this round
+  finished: false, // already reached the logo this round
+  holdUntil: 0, // frozen while the escape card is up
+  respawns: 0,
   startedAt: performance.now(),
   id: null,
   names: new Map(), // player id -> name
@@ -53,18 +55,13 @@ window.mazegame = state; // handy for the console and for smoke tests
 
 function setMaze(seed) {
   state.maze = buildMaze(pinnedSeed ?? seed >>> 0);
-  // Own corner of the map, jittered so two players sharing one never stack.
-  const spawn = spawnFor(state.maze, state.id);
-  state.cam = {
-    x: spawn.x + (Math.random() - 0.5) * 0.5,
-    y: spawn.y + (Math.random() - 0.5) * 0.5,
-    a: spawn.a,
-  };
-  state.spawnDist = spawn.dist;
   state.startedAt = performance.now();
-  state.won = false;
+  state.finished = false;
+  state.holdUntil = 0;
+  state.respawns = 0;
   visited.clear();
-  markVisited();
+  // Own corner of the map, jittered so two players sharing one never stack.
+  placeAt(spawnFor(state.maze, state.id));
 }
 
 function markVisited() {
@@ -239,7 +236,8 @@ function blocked(maze, x, y) {
 
 function step(dt) {
   const { maze, cam } = state;
-  if (!maze || state.won) return;
+  // Frozen only while the escape card is up, not for the rest of the round.
+  if (!maze || performance.now() < state.holdUntil) return;
 
   const fast = keys.has("ShiftLeft") || keys.has("ShiftRight") || touch.boost;
   const speed = (fast ? RUN : WALK) * dt;
@@ -268,21 +266,37 @@ function step(dt) {
     markVisited();
   }
 
-  if (Math.hypot(cam.x - maze.exit.x, cam.y - maze.exit.y) < WIN_DIST) win();
+  if (!state.finished && Math.hypot(cam.x - maze.exit.x, cam.y - maze.exit.y) < WIN_DIST) win();
 }
 
 function win() {
-  if (state.won) return;
-  state.won = true;
-  state.wonAt = performance.now();
-  const secs = (state.wonAt - state.startedAt) / 1000;
+  if (state.finished) return;
+  state.finished = true;
+  const now = performance.now();
+  state.holdUntil = now + WIN_DWELL;
+  const secs = (now - state.startedAt) / 1000;
   showOverlay(
     `<strong>ESCAPED</strong><br>${secs.toFixed(1)}s · ${state.spawnDist} tiles from your spawn` +
-      `<br><small>keep wandering — the maze changes when the countdown ends</small>`,
+      `<br><small>back into the maze — it changes when the countdown ends</small>`,
     "won",
   );
-  setTimeout(hideOverlay, WIN_DWELL);
   socket && socket.send({ t: "escaped" });
+  setTimeout(() => {
+    hideOverlay();
+    // Dropped back in somewhere else so there is still a maze to wander
+    // while the countdown runs out.
+    placeAt(spawnFor(state.maze, (state.id || 1) * 101 + ++state.respawns));
+  }, WIN_DWELL);
+}
+
+function placeAt(spawn) {
+  state.cam = {
+    x: spawn.x + (Math.random() - 0.5) * 0.5,
+    y: spawn.y + (Math.random() - 0.5) * 0.5,
+    a: spawn.a,
+  };
+  state.spawnDist = spawn.dist;
+  markVisited();
 }
 
 function clock(secs) {
