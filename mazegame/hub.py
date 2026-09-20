@@ -34,6 +34,12 @@ def _name() -> str:
     return f"{random.choice(_ADJECTIVES)}-{random.choice(_NOUNS)}"
 
 
+def clean_name(raw: str | None) -> str:
+    """Player-chosen name, or a generated one when nothing usable is given."""
+    text = "".join(ch for ch in (raw or "") if ch.isprintable() and ch not in "\u2028\u2029")
+    return text.strip()[:24] or _name()
+
+
 def new_seed() -> int:
     return secrets.randbelow(1 << 32)
 
@@ -87,7 +93,7 @@ class Hub:
 
     def add_player(self, conn, name: str | None = None) -> Player:
         with self._lock:
-            player = Player(pid=next(self._ids), name=(name or _name())[:24], conn=conn)
+            player = Player(pid=next(self._ids), name=clean_name(name), conn=conn)
             self.players[player.pid] = player
         self._broadcast_roster()
         return player

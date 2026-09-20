@@ -5,7 +5,8 @@ Brick corridors, a pixelated raycaster, and an exit made of the NixOS snowflake.
 
 Two pages:
 
-- `/` — **play**: wander a seeded maze until you reach the logo, then get a new one.
+- `/` — **play**: pick a name (blank gets you a generated one), then wander a
+  seeded maze until you reach the logo and get a new one.
 - `/watch` — **maze cam**: rides along with one random player. When that player
   stops moving for 2 seconds, the camera cuts to the next player.
 
@@ -68,6 +69,10 @@ running service, so the unit is verified rather than assumed.
 | mouse (click to capture) | look |
 | `shift` | run |
 | `esc` | release the mouse |
+
+Your name is asked once per browser and remembered in `localStorage`; leave the
+field empty for a generated one like `pinned-hopper`. `/?name=whoever` skips the
+card entirely, which is what shared links and kiosks want.
 
 Watcher page: `space` / `N` skips to the next player, `F` goes fullscreen.
 

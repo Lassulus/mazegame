@@ -68,28 +68,34 @@ function markVisited() {
 
 // -- networking ---------------------------------------------------------
 
-const socket = createSocket("/ws/play" + (params.get("name") ? `?name=${encodeURIComponent(params.get("name"))}` : ""), {
-  onStatus(text, kind) {
-    elStatus.textContent = text;
-    elStatus.dataset.kind = kind;
-  },
-  onMessage(msg) {
-    if (msg.t === "welcome") {
-      elName.textContent = msg.name;
-      document.title = `${msg.name} · NixOS Maze`;
-      setMaze(msg.seed);
-    } else if (msg.t === "seed") {
-      respawn(msg.seed);
-    } else if (msg.t === "watched") {
-      elWatchers.textContent = msg.n;
-      elWatched.classList.toggle("hidden", msg.n === 0);
-    }
-  },
-});
+let socket = null;
+
+// Blank name is intentional: the server hands out a random one.
+function connect(name) {
+  const query = name ? `?name=${encodeURIComponent(name)}` : "";
+  socket = createSocket(`/ws/play${query}`, {
+    onStatus(text, kind) {
+      elStatus.textContent = text;
+      elStatus.dataset.kind = kind;
+    },
+    onMessage(msg) {
+      if (msg.t === "welcome") {
+        elName.textContent = msg.name;
+        document.title = `${msg.name} · NixOS Maze`;
+        setMaze(msg.seed);
+      } else if (msg.t === "seed") {
+        respawn(msg.seed);
+      } else if (msg.t === "watched") {
+        elWatchers.textContent = msg.n;
+        elWatched.classList.toggle("hidden", msg.n === 0);
+      }
+    },
+  });
+}
 
 let lastSent = 0;
 function pushPosition(now) {
-  if (now - lastSent < 1000 / SEND_HZ) return;
+  if (!socket || now - lastSent < 1000 / SEND_HZ) return;
   lastSent = now;
   socket.send({ t: "pos", x: state.cam.x, y: state.cam.y, a: state.cam.a });
 }
@@ -101,12 +107,19 @@ const MOVE_KEYS = new Set([
   "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space",
 ]);
 
+// WASD are also letters: never swallow them while a field has focus.
+const typing = (e) => !!(e.target && e.target.closest && e.target.closest("input, textarea"));
+
 addEventListener("keydown", (e) => {
+  if (typing(e)) return;
   if (MOVE_KEYS.has(e.code)) e.preventDefault();
   keys.add(e.code);
   if (e.code === "Escape") document.exitPointerLock();
 });
-addEventListener("keyup", (e) => keys.delete(e.code));
+addEventListener("keyup", (e) => {
+  if (typing(e)) return;
+  keys.delete(e.code);
+});
 addEventListener("blur", () => keys.clear());
 
 view.addEventListener("click", () => {
@@ -202,7 +215,7 @@ function win() {
     "won",
   );
   // Offline fallback: no server means no seed handout, so pick our own.
-  if (!socket.send({ t: "escaped" })) respawn((Math.random() * 2 ** 32) >>> 0);
+  if (!socket || !socket.send({ t: "escaped" })) respawn((Math.random() * 2 ** 32) >>> 0);
 }
 
 // Let the escape card breathe, and swap mazes exactly when watchers do.
@@ -236,9 +249,43 @@ function frame(now) {
 addEventListener("resize", () => renderer.resize());
 addEventListener("orientationchange", () => setTimeout(() => renderer.resize(), 120));
 
+// -- joining -------------------------------------------------------------
+
+const elJoin = document.getElementById("join");
+const elJoinForm = document.getElementById("join-form");
+const elJoinName = document.getElementById("join-name");
+const NAME_KEY = "mazegame.name";
+
+function join(name) {
+  const clean = name.trim().slice(0, 24);
+  if (clean) localStorage.setItem(NAME_KEY, clean);
+  else localStorage.removeItem(NAME_KEY);
+  elJoin.classList.add("hidden");
+  connect(clean);
+  showOverlay(isTouch ? TOUCH_HINT : MOUSE_HINT, "paused");
+  if (!isTouch) {
+    const lock = view.requestPointerLock();
+    if (lock && lock.catch) lock.catch(() => {}); // refused if unfocused; harmless
+  }
+}
+
+elJoinForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  join(elJoinName.value);
+});
+
 renderer.init().then(() => {
   if (!state.maze) setMaze((Math.random() * 2 ** 32) >>> 0);
   document.body.classList.toggle("touch", isTouch);
-  showOverlay(isTouch ? TOUCH_HINT : MOUSE_HINT, "paused");
   requestAnimationFrame(frame);
+
+  // A name in the URL is an explicit choice (shared links, kiosks): skip the
+  // card. Otherwise ask, pre-filled with whatever this browser used last.
+  if (params.has("name")) {
+    join(params.get("name"));
+  } else {
+    elJoinName.value = localStorage.getItem(NAME_KEY) || "";
+    elJoin.classList.remove("hidden");
+    elJoinName.focus();
+  }
 });
