@@ -11,6 +11,7 @@ order (preferring one that is currently moving).
 
 from __future__ import annotations
 
+import heapq
 import itertools
 import json
 import math
@@ -28,6 +29,8 @@ BUCKET = 8  # tiles per interest bucket edge
 PEER_LIMIT = 20  # neighbours sent per client
 PEER_INTERVAL = 0.05  # seconds between position snapshots
 PEER_BUSY = 60  # above this many players, halve the snapshot rate
+PEER_EXACT_MAX = 200  # above this, shortlist per bucket before per-client picks
+PEER_SHORTLIST = 60  # candidates kept per bucket when crowded
 
 _ADJECTIVES = (
     "lost", "pure", "lazy", "eager", "hermetic", "sandboxed", "rolling",
@@ -240,9 +243,11 @@ class Hub:
         """Positions, but only the neighbours each client can actually see.
 
         Sending every player to every player is quadratic: 500 players meant a
-        10 KB frame fanned out 500 times, 20 times a second. Instead the map is
-        bucketed and one frame is built per occupied bucket, so the cost scales
-        with crowding, not with the square of the roster.
+        10 KB frame fanned out 500 times, 20 times a second. A bucket index
+        keeps the candidate set local, and each client's list is then centred
+        on that client — a shared per-bucket list drops whoever is standing
+        furthest from the bucket's middle, which in a crowd is exactly the
+        player a spectator is trying to follow.
         """
         now = time.monotonic()
         with self._lock:
@@ -260,39 +265,58 @@ class Hub:
                     buckets.setdefault((int(p.x // BUCKET), int(p.y // BUCKET)), []).append(p)
 
             empty = json.dumps({"t": "peers", "n": count, "l": []})
-            cache: dict[tuple[int, int], str] = {}
+            crowded = count > PEER_EXACT_MAX
+            shortlists: dict[tuple[int, int], list[Player]] = {}
 
-            def frame_for(key: tuple[int, int]) -> str:
-                hit = cache.get(key)
-                if hit is not None:
-                    return hit
-                bx, by = key
-                near: list[Player] = []
+            def candidates(bx: int, by: int, exact: bool) -> list[Player]:
+                if not exact and not crowded:
+                    exact = True
+                pool: list[Player] = []
                 for oy in (-1, 0, 1):
                     for ox in (-1, 0, 1):
-                        near.extend(buckets.get((bx + ox, by + oy), ()))
-                cx = (bx + 0.5) * BUCKET
-                cy = (by + 0.5) * BUCKET
-                near.sort(key=lambda q: (q.x - cx) ** 2 + (q.y - cy) ** 2)
+                        pool.extend(buckets.get((bx + ox, by + oy), ()))
+                if exact:
+                    return pool
+                # Big crowd: shortlist once per bucket, then let each client
+                # pick their own nearest out of it. Scanning every neighbour
+                # for every client is what drags the tick rate down when a
+                # few hundred people pile onto the same tile.
+                hit = shortlists.get((bx, by))
+                if hit is None:
+                    cx = (bx + 0.5) * BUCKET
+                    cy = (by + 0.5) * BUCKET
+                    hit = heapq.nsmallest(
+                        PEER_SHORTLIST, pool, key=lambda q: (q.x - cx) ** 2 + (q.y - cy) ** 2
+                    )
+                    shortlists[(bx, by)] = hit
+                return hit
+
+            def frame_around(x: float, y: float, skip: int | None, exact: bool = False) -> str:
+                pool = candidates(int(x // BUCKET), int(y // BUCKET), exact)
+                near = heapq.nsmallest(
+                    PEER_LIMIT,
+                    (q for q in pool if q.pid != skip),
+                    key=lambda q: (q.x - x) ** 2 + (q.y - y) ** 2,
+                )
                 # Names ride along, so clients never need a roster broadcast.
                 entries = [
                     [q.pid, round(q.x, 3), round(q.y, 3), round(q.a, 3),
                      1 if q.finished_at is not None else 0, q.name]
-                    for q in near[:PEER_LIMIT]
+                    for q in near
                 ]
-                built = json.dumps({"t": "peers", "n": count, "l": entries})
-                cache[key] = built
-                return built
+                return json.dumps({"t": "peers", "n": count, "l": entries})
 
             sends = []
             for p in self.players.values():
-                key = (int(p.x // BUCKET), int(p.y // BUCKET))
-                sends.append((p.conn, frame_for(key) if p.placed else empty))
+                sends.append((p.conn, frame_around(p.x, p.y, p.pid) if p.placed else empty))
             for w in self.watchers.values():
                 target = self.players.get(w.target) if w.target else None
                 if target is None or not target.placed:
                     continue
-                sends.append((w.conn, frame_for((int(target.x // BUCKET), int(target.y // BUCKET)))))
+                # Centred on the target and never skipping it: the camera needs
+                # the position of the very player it is riding, even in a crowd
+                # where a shortlist would have dropped them.
+                sends.append((w.conn, frame_around(target.x, target.y, None, exact=True)))
 
         for conn, frame in sends:
             conn.send(frame)
