@@ -19,7 +19,7 @@ const WIN_DIST = 0.9;
 // A body may miss a few snapshots to interest-list churn and still be there;
 // much longer than that and it has genuinely walked out of range, so holding
 // on to it would leave a pawn standing in an empty corridor.
-const PEER_TTL = 3; // snapshots a body may go unmentioned before it is dropped
+const PEER_TTL = 8; // snapshots a body may go unmentioned before it is dropped
 
 const view = document.getElementById("view");
 const minimap = document.getElementById("minimap");
@@ -164,7 +164,9 @@ function applyPeers(msg) {
   // Interest lists churn at the edges: in a crowd a body drops out of the
   // nearest twenty for a tick and comes straight back. Forgetting it on the
   // first miss threw away its interpolation history and made pawns blink.
-  const ttl = (PEER_TTL * 1000) / (msg.hz || 10);
+  // Distant bodies are refreshed on one tick in three, so the window has
+  // to outlive a couple of their turns as well as ordinary list churn.
+  const ttl = Math.max(900, (PEER_TTL * 1000) / (msg.hz || 10));
   for (const [id, peer] of state.peers) {
     if (now - peer.seen > ttl) state.peers.delete(id);
   }

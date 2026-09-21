@@ -189,7 +189,22 @@ Everything here is measured with synthetic clients against one process:
 - **Interest management.** Sending every position to every player is
   quadratic: at 560 players that was a 10 KB frame fanned out 560 times, 20
   times a second — 114 MB/s. A bucket index bounds the candidate set and each
-  client gets the `PEER_LIMIT` (28) nearest bodies.
+  client is told about the `PEER_LIMIT` (96) nearest bodies.
+- **The search widens instead of using a fixed window.** A three-by-three
+  bucket window is anchored on the *cell*, not on the viewer, so standing at a
+  cell edge you were only told about bodies eight tiles ahead — down a long
+  corridor players visibly popped in and out halfway along. `pool_at` now adds
+  a ring at a time until the list is full or `SIGHT` (20 tiles) is reached:
+  28 players strung down one corridor used to arrive as 14, now all 28 do, the
+  farthest 19.6 tiles away. An empty corridor is reported to the horizon; a
+  crowd fills the list from the nearest cells and costs no more to compute.
+- **Distant bodies at a third of the rate.** The nearest `PEER_NEAR` (48) are
+  in every snapshot; the rest are staggered across `FAR_EVERY` (3) ticks, so
+  each frame carries an even share. A body twenty tiles down a corridor is a
+  few pixels tall and its interpolation learns its own rate. That halved the
+  cost of the wider lists: 800 packed players went from 7.2 KB/s per client to
+  4.8, for five times the visibility of the old 20-body window at the same
+  4.6 KB/s it used to cost.
 - **Shared frames in a crowd.** Below `PEER_EXACT_MAX` (120) every client
   gets its own list centred on itself out of `BUCKET` (8 tile) cells. Above
   it, one frame is built per `CROWD_BUCKET` (4 tile) cell and the same bytes
@@ -241,10 +256,14 @@ Everything here is measured with synthetic clients against one process:
   players. nginx needs raising too — its default single worker with 512
   connections caps you at ~250 players, since a proxied websocket costs two
   connections.
-- **Client fill budget.** A crowd standing in one room used to cost several
-  full-screen sprite fills per frame. The renderer draws the nearest pawns
-  within `PAWN_FILL_BUDGET` screenfuls (`MAX_PAWNS` cap), and the minimap's
-  static layer is cached instead of repainting 2601 tiles every frame.
+- **Client fill budget.** A crowd standing in one room could cost several
+  full-screen sprite fills per frame, so the renderer spends a budget of
+  `PAWN_FILL_BUDGET` (2.5) screenfuls on the nearest pawns. The budget is in
+  pixels, which lets a hundred distant pawns through while still cutting a
+  wall of enormous near ones; `MAX_PAWNS` (64) is only a backstop. It used to
+  be a hard cap of ten, which is what made a crowd churn in and out of
+  existence as bodies swapped depth order. The minimap's static layer is
+  cached instead of repainting 2601 tiles every frame.
 
 Measured on one core, players scattered and walking, snapshot gap seen by the
 clients themselves:

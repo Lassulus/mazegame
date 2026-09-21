@@ -44,7 +44,10 @@ MOVE_EPS = 0.015  # world units
 TURN_EPS = 0.015  # radians
 BUCKET = 8  # tiles per interest bucket edge while the room is small
 CROWD_BUCKET = 4  # tighter buckets once frames are shared, so the list stays local
-PEER_LIMIT = 28  # neighbours sent per client; a body is 12 bytes, so this is cheap
+PEER_LIMIT = 96  # most neighbours sent per client; a body is 12 bytes on the wire
+SIGHT = 20.0  # tiles: how far the interest search will reach for company
+PEER_NEAR = 48  # bodies close enough to be worth a slot on every single tick
+FAR_EVERY = 3  # the rest are refreshed on one tick in three, staggered
 PEER_INTERVAL = 0.05  # seconds between position snapshots in a quiet room
 PEER_BUSY = 150  # above this many players, halve the snapshot rate
 PEER_CROWD = 500  # above this, a third of it: the tick has 1200 sockets to write
@@ -135,6 +138,7 @@ class Hub:
         self.deadline: float | None = None  # set by the first escape
         self.finishers: list[dict] = []  # this round's escapes, survives disconnects
         self._peers_due = 0.0
+        self._snapshot_seq = 0
         # Ops: how long the hub thread spends picking/encoding frames versus
         # pushing them out, so a slow room can be diagnosed from /api/state
         # instead of guessed at.
@@ -348,6 +352,7 @@ class Hub:
             # Stay on the cadence instead of drifting a whole tick every time
             # the deadline lands just after a tick boundary.
             self._peers_due = max(now, self._peers_due + interval)
+            self._snapshot_seq += 1
             # Flat tuples, not Player objects: everything below reads a frozen
             # copy, so a player moving mid-tick cannot tear a frame and the
             # hot loops index instead of chasing attributes.
@@ -400,20 +405,57 @@ class Hub:
             )
             return frame, tuple(q[2] for q in near)
 
+        rings = max(1, math.ceil(SIGHT / bucket))
+
         def pool_at(bx: int, by: int) -> list[tuple]:
-            pool: list[tuple] = []
-            for oy in (-1, 0, 1):
-                for ox in (-1, 0, 1):
-                    pool.extend(buckets.get((bx + ox, by + oy), ()))
+            """Bodies near a cell, widening a ring at a time until the list is
+            full or `SIGHT` is reached.
+
+            A fixed three-by-three window is anchored on the *cell*, not on
+            the viewer, so someone standing at a cell edge could only be told
+            about bodies eight tiles ahead and players visibly popped in and
+            out halfway down a corridor. Widening instead means an empty
+            corridor is reported to the horizon, while a crowd fills the list
+            from the nearest cells and costs no more to compute.
+            """
+            pool: list[tuple] = list(buckets.get((bx, by), ()))
+            for r in range(1, rings + 1):
+                if len(pool) >= PEER_LIMIT:
+                    break
+                for oy in range(-r, r + 1):
+                    edge = r if abs(oy) == r else None
+                    for ox in (range(-r, r + 1) if edge else (-r, r)):
+                        pool.extend(buckets.get((bx + ox, by + oy), ()))
             return pool
+
+        def thin(near: list[tuple]) -> list[tuple]:
+            """Every tick for the bodies close by, every `FAR_EVERY`th for the
+            rest.
+
+            The nearest two dozen are what a player is actually looking at.
+            A body twenty tiles down a corridor is a few pixels tall, so
+            spending a twelve-byte slot on it sixty times a minute is waste:
+            it gets a third of the rate, staggered by its position in the
+            list so each tick carries an even share. Interpolation on the
+            client is per body and learns the rate, so the distant ones still
+            glide rather than hop.
+            """
+            if len(near) <= PEER_NEAR:
+                return near
+            out = near[:PEER_NEAR]
+            phase = self._snapshot_seq % FAR_EVERY
+            out.extend(q for i, q in enumerate(near[PEER_NEAR:]) if i % FAR_EVERY == phase)
+            return out
 
         def around(x: float, y: float, skip: int | None) -> tuple[bytes, tuple[int, ...]]:
             pool = pool_at(int(x // bucket), int(y // bucket))
             return build(
-                heapq.nsmallest(
-                    PEER_LIMIT,
-                    (q for q in pool if q[2] != skip),
-                    key=lambda q: (q[0] - x) ** 2 + (q[1] - y) ** 2,
+                thin(
+                    heapq.nsmallest(
+                        PEER_LIMIT,
+                        (q for q in pool if q[2] != skip),
+                        key=lambda q: (q[0] - x) ** 2 + (q[1] - y) ** 2,
+                    )
                 )
             )
 
@@ -441,13 +483,16 @@ class Hub:
             shared: dict[tuple[int, int], tuple[bytes, tuple[int, ...]]] = {}
             for cell in buckets:
                 pool = pool_at(*cell)
-                if len(pool) > PEER_LIMIT:
-                    cx = (cell[0] + 0.5) * bucket
-                    cy = (cell[1] + 0.5) * bucket
-                    pool = heapq.nsmallest(
+                cx = (cell[0] + 0.5) * bucket
+                cy = (cell[1] + 0.5) * bucket
+                pool = (
+                    heapq.nsmallest(
                         PEER_LIMIT, pool, key=lambda q: (q[0] - cx) ** 2 + (q[1] - cy) ** 2
                     )
-                shared[cell] = build(pool)
+                    if len(pool) > PEER_LIMIT
+                    else sorted(pool, key=lambda q: (q[0] - cx) ** 2 + (q[1] - cy) ** 2)
+                )
+                shared[cell] = build(thin(pool))
             for player, x, y, _pid in viewers:
                 queue(player, *shared[(int(x // bucket), int(y // bucket))])
         else:

@@ -10,7 +10,7 @@ import { isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
 const IDLE_LIMIT = 2000; // must match hub.IDLE_SWITCH
-const PEER_TTL = 3; // snapshots a body may go unmentioned before it is dropped
+const PEER_TTL = 8; // snapshots a body may go unmentioned before it is dropped
 
 const view = document.getElementById("view");
 const elName = document.getElementById("target");
@@ -145,7 +145,9 @@ function applyPeers(msg) {
   // A body that drops out of the nearest twenty for one tick is still there:
   // forgetting it immediately threw away its interpolation history. Much
   // longer than a few snapshots, though, and it really has walked away.
-  const ttl = (PEER_TTL * 1000) / (msg.hz || 10);
+  // Distant bodies are refreshed on one tick in three, so the window has
+  // to outlive a couple of their turns as well as ordinary list churn.
+  const ttl = Math.max(900, (PEER_TTL * 1000) / (msg.hz || 10));
   for (const [id, peer] of state.peers) {
     if (now - peer.seen > ttl) state.peers.delete(id);
   }

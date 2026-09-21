@@ -10,8 +10,8 @@ const MIN_PLANE = 0.75; // ~74 degrees horizontal, the narrowest we allow
 const PAWN_HEIGHT = 0.72; // world units, a bit shorter than a wall
 const FINISHED_COLOR = [126, 186, 228]; // NixOS blue for players who escaped
 const NEAR_PAWN = 0.45; // closer than this a pawn is just a wall of colour
-const MAX_PAWNS = 10; // hard cap on sprites per frame
-const PAWN_FILL_BUDGET = 0.9; // screenfuls of sprite fill allowed per frame
+const MAX_PAWNS = 64; // hard cap on sprites per frame
+const PAWN_FILL_BUDGET = 2.5; // screenfuls of sprite fill allowed per frame
 
 // Stable per-player hue: golden-angle spacing keeps neighbours distinct.
 export function playerColor(id) {
@@ -223,9 +223,11 @@ export class Renderer {
     const sprite = this.tex.pawn;
     const invDet = 1 / (planeX * dirY - dirX * planeY);
 
-    // Project first, then spend a fixed fill budget on the nearest pawns. A
-    // crowd in one room would otherwise cost several full-screen fills per
-    // frame and stall a phone into an unresponsive tab.
+    // Project first, then spend a fill budget on the nearest pawns. A crowd
+    // in one room would otherwise cost several full-screen fills per frame
+    // and stall a phone into an unresponsive tab. The budget is in pixels, so
+    // it lets a hundred distant pawns through while still cutting a wall of
+    // enormous near ones; the count cap is only a backstop.
     const visible = [];
     for (const p of peers) {
       const relX = p.x - cam.x;
