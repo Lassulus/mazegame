@@ -15,6 +15,8 @@ const view = document.getElementById("view");
 const elStandby = document.getElementById("standby");
 const elPlaying = document.getElementById("playing");
 const elPlayers = document.getElementById("players");
+const elWatching = document.getElementById("watching");
+const elTarget = document.getElementById("target");
 
 const renderer = new Renderer(view, { pixel: retroPixel() });
 
@@ -30,6 +32,7 @@ window.mazecam = state; // handy for the console and for smoke tests
 
 function standby(on) {
   elStandby.classList.toggle("hidden", !on);
+  elWatching.classList.toggle("hidden", on);
   document.body.classList.toggle("nosignal", on);
 }
 
@@ -50,6 +53,7 @@ const socket = createSocket("/ws/watch", {
       state.cam = { ...spawn };
       state.peers.clear();
       document.title = `watching ${msg.name} · NixOS Maze`;
+      elTarget.textContent = msg.name;
       standby(false);
       showPlayers(msg.players);
       document.body.classList.add("flash");

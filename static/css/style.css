@@ -306,6 +306,32 @@ body.flash #view {
   color: var(--nix-light);
 }
 
+.watching {
+  position: fixed;
+  left: max(18px, env(safe-area-inset-left));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 4;
+  max-width: calc(100vw - 200px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--hud);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+}
+
+/* The name is the player's own; keep its case and don't space it apart. */
+.watching b {
+  text-transform: none;
+  letter-spacing: 0.04em;
+  color: var(--nix-light);
+}
+
 .join-button {
   display: block;
   padding: 7px 6px;
