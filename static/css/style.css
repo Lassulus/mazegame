@@ -289,6 +289,23 @@ body.flash #view {
   box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
 }
 
+.playing {
+  padding: 4px 6px;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--text);
+  background: var(--hud);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+}
+
+.playing b {
+  color: var(--nix-light);
+}
+
 .join-button {
   display: block;
   padding: 7px 6px;

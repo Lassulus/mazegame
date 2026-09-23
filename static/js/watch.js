@@ -13,6 +13,8 @@ const PEER_TTL = 8; // snapshots a body may go unmentioned before it is dropped
 
 const view = document.getElementById("view");
 const elStandby = document.getElementById("standby");
+const elPlaying = document.getElementById("playing");
+const elPlayers = document.getElementById("players");
 
 const renderer = new Renderer(view, { pixel: retroPixel() });
 
@@ -31,6 +33,12 @@ function standby(on) {
   document.body.classList.toggle("nosignal", on);
 }
 
+// Hidden at zero: the standby card already says the maze is empty.
+function showPlayers(n) {
+  elPlayers.textContent = n;
+  elPlaying.classList.toggle("hidden", !n);
+}
+
 const socket = createSocket("/ws/watch", {
   onMessage(msg) {
     if (msg.t === "watch") {
@@ -43,9 +51,11 @@ const socket = createSocket("/ws/watch", {
       state.peers.clear();
       document.title = `watching ${msg.name} · NixOS Maze`;
       standby(false);
+      showPlayers(msg.players);
       document.body.classList.add("flash");
       setTimeout(() => document.body.classList.remove("flash"), 220);
     } else if (msg.t === "peers") {
+      showPlayers(msg.n);
       applyPeers(msg);
     } else if (msg.t === "world") {
       state.maze = buildMaze(msg.seed >>> 0);
@@ -55,6 +65,7 @@ const socket = createSocket("/ws/watch", {
       state.peers.clear();
       document.title = "NixOS Maze · watch";
       standby(true);
+      showPlayers(0);
     }
   },
 });

@@ -14,8 +14,8 @@ Two pages:
   others to the logo.
 - `/watch` — **maze cam**: rides along with one random player. When that player
   stops moving for 2 seconds, the camera cuts to the next player. Made for a
-  wall or a projector, it shows nothing but the maze and, in one corner, a QR
-  code to this server and a button to join.
+  wall or a projector, it shows nothing but the maze and, in one corner, how
+  many are playing, a QR code to this server and a button to join.
 
 No build step for the client and no dependencies for the server: the server
 is a Rust binary built from the standard library alone (HTTP, the WebSocket
