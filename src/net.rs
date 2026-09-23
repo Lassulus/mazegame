@@ -10,6 +10,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -26,12 +27,17 @@ const SILENCE: Duration = Duration::from_secs(12);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(20);
 const READ_CHUNK: usize = 8192;
 const MAX_HEAD: usize = 16 * 1024;
+/// Websockets held at once. Each costs a reader and a writer thread, and
+/// systemd caps the unit at 8192 tasks: past that no thread can be had for
+/// anything, /api included, so the last arrivals are turned away instead.
+const MAX_SOCKETS: usize = 3000;
 
 pub struct Server {
     pub hub: Arc<Hub>,
     pub statics: StaticFiles,
     pub version: &'static str,
     pub verbose: bool,
+    sockets: AtomicUsize,
 }
 
 impl Server {
@@ -41,6 +47,7 @@ impl Server {
             statics: StaticFiles::new(static_root),
             version,
             verbose,
+            sockets: AtomicUsize::new(0),
         }
     }
 
@@ -174,19 +181,30 @@ impl Server {
         let Some(key) = request.header("sec-websocket-key") else {
             return;
         };
+        // Claim a slot and a writer before promising a websocket, so a full
+        // server answers with a status the client can see.
+        let Some(_slot) = Slot::take(&self.sockets) else {
+            self.refuse(&stream);
+            return;
+        };
+        let Ok(reader) = stream.try_clone() else {
+            return;
+        };
+        let Some(conn) = Conn::new(stream) else {
+            self.refuse(&reader);
+            return;
+        };
         let handshake = format!(
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
             accept_key(key)
         );
-        let mut out = &stream;
-        if out.write_all(handshake.as_bytes()).is_err() {
+        // Nothing is queued on `conn` until the hub hears of it below, so the
+        // writer cannot get ahead of the handshake.
+        if (&reader).write_all(handshake.as_bytes()).is_err() {
+            conn.abort();
             return;
         }
-        let Ok(reader) = stream.try_clone() else {
-            return;
-        };
         let _ = reader.set_read_timeout(Some(SILENCE));
-        let conn = Conn::new(stream);
 
         let watching = request.path == "/ws/watch";
         let name = request.param("name").map(str::to_string);
@@ -228,6 +246,18 @@ impl Server {
             self.log(&format!("player {pid} left"));
         }
         conn.abort();
+    }
+
+    fn refuse(&self, stream: &TcpStream) {
+        let _ = respond(
+            &mut &*stream,
+            503,
+            b"the maze is full",
+            "text/plain; charset=utf-8",
+            "no-store",
+            false,
+            self.version,
+        );
     }
 
     /// Read frames until the peer goes quiet, handing text messages over.
@@ -278,6 +308,26 @@ impl Server {
                 Err(_) => return, // timeout means silence, which means gone
             }
         }
+    }
+}
+
+/// One of the `MAX_SOCKETS`, handed back on drop.
+struct Slot<'a>(&'a AtomicUsize);
+
+impl<'a> Slot<'a> {
+    fn take(count: &'a AtomicUsize) -> Option<Self> {
+        count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_SOCKETS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(count))
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

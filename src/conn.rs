@@ -39,8 +39,9 @@ pub struct Conn {
 }
 
 impl Conn {
-    /// Take over a socket and start its writer thread.
-    pub fn new(stream: TcpStream) -> Arc<Self> {
+    /// Take over a socket and start its writer thread. `None` means no thread
+    /// could be had: a connection nobody writes to must not join the maze.
+    pub fn new(stream: TcpStream) -> Option<Arc<Self>> {
         let conn = Arc::new(Self {
             stream,
             queue: Mutex::new(Queue {
@@ -56,11 +57,12 @@ impl Conn {
         // 64 KiB is plenty for a loop that only calls write_all, and at a
         // thousand players the default 2 MiB of stack reservation each starts
         // to matter.
-        let _ = thread::Builder::new()
+        thread::Builder::new()
             .name("ws-write".into())
             .stack_size(64 * 1024)
-            .spawn(move || writer.pump());
-        conn
+            .spawn(move || writer.pump())
+            .ok()?;
+        Some(conn)
     }
 
     /// Queue an already-framed message. `false` means it was not taken.
