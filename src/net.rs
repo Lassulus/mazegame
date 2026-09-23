@@ -212,7 +212,11 @@ impl Server {
                             json::number(message, "a"),
                         ) {
                             if x.is_finite() && y.is_finite() && a.is_finite() {
-                                self.hub.move_player(pid, x, y, a);
+                                // `c` is the client's clock when it sampled
+                                // the position; older clients leave it out.
+                                let sent =
+                                    json::field(message, "c").and_then(|v| v.parse::<f64>().ok());
+                                self.hub.move_player(pid, x, y, a, sent);
                             }
                         }
                     }

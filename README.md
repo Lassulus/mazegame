@@ -249,6 +249,29 @@ Everything here is measured with synthetic clients against one process:
   | 5th-95th percentile | 0.51-2.37 tiles/s | 1.35-1.54 |
   | coefficient of variation | 0.39 | 0.10 |
   | frames stalled | 31 % (worst run) | 0 % |
+- **Positions keep the time they were true.** The `age` above was measured
+  from when a position *reached the server*, which is only honest if the
+  player's uplink is. Over a real one — Wi-Fi, a phone — positions arrive late
+  and in bunches, and the spectator camera inherited all of it: on production,
+  with bots across the internet, the camera's speed varied by 120 % and it
+  stood still for up to 133 ms at a time, at 10 players as at 150. Clients now
+  send their own clock with every position (`c`); the server maps it onto its
+  own through the least-delayed packet it has seen (`SenderClock`), so a
+  position that sat in a queue on the way keeps the moment it happened. The
+  client's playback delay then covers the worst recent lateness plus the
+  longest recent gap between samples, grows quickly when that rises and eases
+  back slowly, and drops the duplicate a snapshot produces when a body sent
+  nothing new. A bot walking a constant 1.5 tiles/s behind 120 ms of
+  simulated uplink jitter, as the camera rendered it:
+
+  | | arrival time | sender's clock |
+  | --- | --- | --- |
+  | coefficient of variation | 0.95 | 0.17 |
+  | 95th percentile speed | 4.44 tiles/s | 1.67 |
+  | longest freeze | 117 ms | 0 ms |
+
+  The price is latency on a bad link: the camera rides such a player about a
+  quarter of a second behind instead of a tenth.
 - **Bodies persist across churn.** An interest list is the nearest 28, so in
   a crowd a body drops out for a tick and comes straight back. Deleting it on
   the first miss threw away its interpolation history and made pawns blink;

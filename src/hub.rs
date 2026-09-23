@@ -136,6 +136,45 @@ pub fn clean_name(raw: Option<&str>) -> String {
     }
 }
 
+/// Maps a client's clock onto ours.
+///
+/// The offset is the smallest (arrival − sent) seen: the packet that got
+/// through fastest is the best estimate of the fixed part of the delay, and
+/// everything above it is queueing — exactly the part that must not leak into
+/// a position's timestamp. It creeps upward slowly so one freak packet cannot
+/// pin it, and resets if the client's clock jumps.
+#[derive(Default)]
+struct SenderClock {
+    offset: Option<f64>,
+    last: f64,
+}
+
+/// Allowed drift between the two clocks, ms per ms: 50 ppm, well above what
+/// real oscillators do.
+const CLOCK_DRIFT: f64 = 0.000_05;
+/// A position is never placed further back than this, whatever the clocks say.
+const MAX_LAG_MS: f64 = 500.0;
+
+impl SenderClock {
+    /// How long ago, in our ms, a position sent at `sent` (their ms) was true.
+    fn lag(&mut self, sent: f64, here: f64) -> f64 {
+        if !sent.is_finite() {
+            return 0.0;
+        }
+        let seen = here - sent;
+        match self.offset {
+            Some(offset) if seen >= offset && seen - offset < 2000.0 => {
+                self.offset = Some(offset + (here - self.last).max(0.0) * CLOCK_DRIFT);
+            }
+            // First packet, a faster one, or the client's clock jumped.
+            _ => self.offset = Some(seen),
+        }
+        self.last = here;
+        let offset = self.offset.unwrap_or(seen);
+        (seen - offset).clamp(0.0, MAX_LAG_MS)
+    }
+}
+
 pub struct Player {
     pub pid: u32,
     pub name: String,
@@ -150,6 +189,7 @@ pub struct Player {
     /// wobble is what makes other players' walking look uneven: the client
     /// needs the age to place the sample on its own timeline.
     moved_at: Instant,
+    clock: SenderClock,
     finished_at: Option<Instant>,
     place: Option<usize>,
     escapes: u32,
@@ -297,6 +337,7 @@ impl Hub {
             placed: false,
             last_move: now,
             moved_at: now,
+            clock: SenderClock::default(),
             finished_at: None,
             place: None,
             escapes: 0,
@@ -341,8 +382,17 @@ impl Hub {
     }
 
     /// Record a position. Returns true if it counts as movement.
-    pub fn move_player(&self, pid: u32, x: f32, y: f32, a: f32) -> bool {
+    ///
+    /// `sent` is the client's own clock (ms) when it sampled the position.
+    /// Arrival time is the wrong timestamp: over a real uplink positions come
+    /// in late and in bunches, and stamping them on arrival handed the
+    /// spectator camera that jitter — measured on production with bots
+    /// across the internet, the camera's speed varied by 120 % and stalled
+    /// for up to 133 ms. The client clock is mapped onto ours through the
+    /// least-delayed packet seen, so a late packet keeps the time it was true.
+    pub fn move_player(&self, pid: u32, x: f32, y: f32, a: f32, sent: Option<f64>) -> bool {
         let now = Instant::now();
+        let here = now.saturating_duration_since(self.started).as_secs_f64() * 1000.0;
         let mut state = lock(&self.state);
         let Some(player) = state.players.iter_mut().find(|p| p.pid == pid) else {
             return false;
@@ -355,7 +405,14 @@ impl Hub {
         player.y = y;
         player.a = a;
         player.placed = true;
-        player.moved_at = now;
+        player.moved_at = match sent {
+            Some(sent) => {
+                let lag = player.clock.lag(sent, here);
+                now.checked_sub(Duration::from_secs_f64(lag / 1000.0))
+                    .unwrap_or(now)
+            }
+            None => now,
+        };
         if moved {
             player.last_move = now;
         }
@@ -1184,6 +1241,36 @@ mod tests {
         }
         assert!(seen[..PEER_NEAR].iter().all(|&n| n == FAR_EVERY));
         assert!(seen[PEER_NEAR..].iter().all(|&n| n == 1), "{seen:?}");
+    }
+
+    /// A packet held up in a queue keeps the moment it was sampled: after
+    /// one fast packet sets the baseline, later arrivals report exactly their
+    /// extra delay, bunched arrivals get spread back out, and a client whose
+    /// clock jumps is re-baselined instead of being placed seconds away.
+    #[test]
+    fn late_positions_keep_the_time_they_were_true() {
+        let mut clock = SenderClock::default();
+        // Sent every 50 ms of their clock, which runs 10 s behind ours.
+        assert_eq!(clock.lag(0.0, 10_020.0), 0.0); // 20 ms trip, the baseline
+        assert!((clock.lag(50.0, 10_070.0) - 0.0).abs() < 0.01);
+        // Three positions stuck behind one another, delivered at once.
+        let bunched: Vec<f64> = [100.0, 150.0, 200.0]
+            .iter()
+            .map(|&sent| clock.lag(sent, 10_230.0))
+            .collect();
+        assert!((bunched[0] - 110.0).abs() < 0.1, "{bunched:?}");
+        assert!((bunched[1] - 60.0).abs() < 0.1, "{bunched:?}");
+        assert!((bunched[2] - 10.0).abs() < 0.1, "{bunched:?}");
+        // A faster trip than ever before lowers the baseline.
+        assert_eq!(clock.lag(250.0, 10_260.0), 0.0);
+        // A real stall is reported as one, up to the cap.
+        assert!((clock.lag(300.0, 10_600.0) - 290.0).abs() < 0.1);
+        assert_eq!(clock.lag(350.0, 12_000.0), MAX_LAG_MS);
+        // Their clock restarts a minute later (a suspended laptop can do
+        // this): re-baselined, not placed half a second in the past forever.
+        assert_eq!(clock.lag(5.0, 70_000.0), 0.0);
+        assert!((clock.lag(55.0, 70_050.0) - 0.0).abs() < 0.01);
+        assert_eq!(clock.lag(f64::NAN, 70_100.0), 0.0);
     }
 
     /// A viewer is told a name once; repeats cost nothing on the wire.

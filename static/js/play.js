@@ -147,7 +147,8 @@ function applyPeers(msg) {
   // else's walk look uneven.
   if (msg.hz) state.sendHz = Math.min(SEND_HZ, msg.hz * 2);
   // Snapshots are laid out on the server's clock, not on their arrival time.
-  const now = clockTime(state.clock, msg.clock, performance.now());
+  const arrived = performance.now();
+  const now = clockTime(state.clock, msg.clock, arrived);
   for (const [id, x, y, a, finished, age] of msg.l) {
     if (id === state.id) continue; // that one is us
     let peer = state.peers.get(id);
@@ -159,7 +160,7 @@ function applyPeers(msg) {
     peer.seen = now;
     // `age` is how stale the body was when the tick sampled it, so the sample
     // lands where it belongs on the timeline instead of on the tick boundary.
-    pushSample(peer.track, x, y, a, now - age);
+    pushSample(peer.track, x, y, a, now - age, arrived);
   }
   // Interest lists churn at the edges: in a crowd a body drops out of the
   // nearest twenty for a tick and comes straight back. Forgetting it on the
@@ -204,7 +205,10 @@ let lastSent = 0;
 function pushPosition(now) {
   if (!socket || now - lastSent < 1000 / state.sendHz) return;
   lastSent = now;
-  socket.send({ t: "pos", x: state.cam.x, y: state.cam.y, a: state.cam.a });
+  // `c` is when this position was true on our clock. The server maps it onto
+  // its own, so a packet that sat in a queue on the way still plays back at
+  // the moment it happened instead of when it finally arrived.
+  socket.send({ t: "pos", x: state.cam.x, y: state.cam.y, a: state.cam.a, c: Math.round(now) });
 }
 
 // -- input ---------------------------------------------------------------

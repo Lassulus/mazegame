@@ -121,7 +121,8 @@ const socket = createSocket("/ws/watch", {
 function applyPeers(msg) {
   state.players = msg.n;
   elPlayers.textContent = msg.n;
-  const now = clockTime(state.clock, msg.clock, performance.now());
+  const arrived = performance.now();
+  const now = clockTime(state.clock, msg.clock, arrived);
   for (const [id, x, y, a, finished, age] of msg.l) {
     if (state.target && id === state.target.id) {
       const moved =
@@ -130,7 +131,7 @@ function applyPeers(msg) {
         Math.abs(wrapAngle(a - state.lastPos.a)) > 0.015;
       if (moved) state.lastMove = now;
       state.lastPos = { x, y, a };
-      pushSample(state.camTrack, x, y, a, now - age);
+      pushSample(state.camTrack, x, y, a, now - age, arrived);
       continue;
     }
     let peer = state.peers.get(id);
@@ -140,7 +141,7 @@ function applyPeers(msg) {
     }
     peer.finished = !!finished;
     peer.seen = now;
-    pushSample(peer.track, x, y, a, now - age);
+    pushSample(peer.track, x, y, a, now - age, arrived);
   }
   // A body that drops out of the nearest twenty for one tick is still there:
   // forgetting it immediately threw away its interpolation history. Much
