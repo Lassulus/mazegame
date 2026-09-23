@@ -1,6 +1,6 @@
 [package]
 name = "mazegame"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Windows 95 style maze you play in a browser tab, with a spectator camera"

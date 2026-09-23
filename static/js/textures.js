@@ -38,21 +38,25 @@ function shadeAll(pixels, size, { floor = 0, emissive = false } = {}) {
   return { size, shift, mask: size - 1, levels };
 }
 
+// Windows 95 3D Maze bricks: four fat courses per wall, joints of near-white
+// mortar a quarter as thick as a course. Each joint is split across the
+// edges of the bricks it separates, so tiles meet with the same width.
 function brickTexture(size = 64) {
   const rnd = mulberry32(0xb21ce5);
   const px = new Uint32Array(size * size);
-  const brickH = 8;
+  const brickH = 16;
   const brickW = 32;
+  const joint = 2; // mortar per brick edge; 4 px between neighbours
   const rows = size / brickH;
   const cols = size / brickW;
-  const mortar = [134, 126, 116];
-  const clay = [168, 64, 46];
+  const mortar = [230, 228, 220];
+  const clay = [178, 50, 34];
 
   // Per-brick brightness and fired-clay hue wobble, stable across frames.
   const shade = new Float32Array(rows * cols);
   const warm = new Float32Array(rows * cols);
   for (let i = 0; i < shade.length; i++) {
-    shade[i] = 0.78 + rnd() * 0.42;
+    shade[i] = 0.88 + rnd() * 0.24;
     warm[i] = rnd() * 2 - 1;
   }
 
@@ -66,18 +70,18 @@ function brickTexture(size = 64) {
       let r;
       let g;
       let b;
-      if (inRowY < 1 || inRowX < 2) {
-        const n = rnd() * 12 - 6;
+      if (inRowY < joint || inRowY >= brickH - joint || inRowX < joint || inRowX >= brickW - joint) {
+        const n = rnd() * 10 - 5;
         [r, g, b] = [mortar[0] + n, mortar[1] + n, mortar[2] + n];
       } else {
         const brick = row * cols + ((bx / brickW) | 0);
         const k = shade[brick];
         const w = warm[brick];
-        const grad = 1 - (inRowY / brickH) * 0.28; // light falls from above
-        const n = rnd() * 18 - 9;
-        r = clay[0] * k * grad + w * 14 + n;
-        g = clay[1] * k * grad + w * 9 + n;
-        b = clay[2] * k * grad + w * 6 + n;
+        const grad = 1 - ((inRowY - joint) / (brickH - 2 * joint)) * 0.22; // light falls from above
+        const n = rnd() * 16 - 8;
+        r = clay[0] * k * grad + w * 12 + n;
+        g = clay[1] * k * grad + w * 7 + n;
+        b = clay[2] * k * grad + w * 5 + n;
       }
       px[y * size + x] = pack(r, g, b);
     }
@@ -91,10 +95,11 @@ function floorTexture(size = 64) {
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const checker = ((x >> 5) ^ (y >> 5)) & 1;
-      const base = checker ? 140 : 118; // worn sandstone flagstones
-      const grout = x % 32 < 2 || y % 32 < 2 ? -34 : 0;
+      const k = checker ? 1 : 0.9; // yellow sandstone flagstones
+      const grout = x % 32 < 2 || y % 32 < 2 ? 0.72 : 1;
       const n = rnd() * 14 - 7;
-      px[y * size + x] = pack(base + 8 + n + grout, base - 4 + n + grout, base - 20 + n + grout);
+      const f = k * grout;
+      px[y * size + x] = pack(214 * f + n, 178 * f + n, 64 * f + n * 0.5);
     }
   }
   return px;
