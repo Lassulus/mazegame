@@ -16,45 +16,16 @@
     <canvas id="view"></canvas>
     <div class="vignette"></div>
     <div class="scanlines"></div>
-    <button id="fullscreen" class="fullscreen" type="button" aria-label="fullscreen">⛶</button>
-    <div id="labels" class="labels"></div>
-
-    <header class="hud top">
-      <div class="brand">
-        <img src="/img/nix-snowflake.svg" alt="NixOS" />
-        <span>MAZE CAM</span>
-      </div>
-      <div class="stats">
-        <span class="chip live"><span class="dot"></span>watching <b id="target">—</b></span>
-        <span class="chip">next maze <b id="round">open</b></span>
-        <span class="chip">players <b id="players">0</b></span>
-        <span class="chip" id="status" data-kind="pending">connecting…</span>
-        <span class="chip version" id="version"></span>
-      </div>
-    </header>
-
-    <div id="banner" class="banner hidden"></div>
 
     <div id="standby" class="standby hidden">
       <img src="/img/nix-snowflake.svg" alt="" />
       <h1>NO ONE IN THE MAZE</h1>
-      <p>waiting for a player to <a href="/">start wandering</a></p>
     </div>
 
-    <footer class="hud bottom">
-      <div class="idle">
-        <span class="idle-label">idle</span>
-        <span class="idle-track"><span id="idlebar" class="idle-bar"></span></span>
-        <span id="idletext" class="idle-text">—</span>
-        <span class="idle-note">switches after 2s without movement</span>
-      </div>
-      <div class="keys">
-        <span class="keys-only"><kbd>space</kbd>/<kbd>N</kbd> next player</span>
-        <span class="keys-only"><kbd>F</kbd> fullscreen</span>
-        <span class="touch-only">tap anywhere for the next player</span>
-        <span><a href="/">play instead →</a></span>
-      </div>
-    </footer>
+    <aside class="join">
+      <div id="qr" class="qr" role="img" aria-label="QR code to play"></div>
+      <a class="join-button" href="/">join the maze</a>
+    </aside>
 
     <script type="module" src="/js/watch.js"></script>
   </body>

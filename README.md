@@ -13,14 +13,16 @@ Two pages:
 - `/` — **play**: pick a name (blank gets you a generated one), then race the
   others to the logo.
 - `/watch` — **maze cam**: rides along with one random player. When that player
-  stops moving for 2 seconds, the camera cuts to the next player.
+  stops moving for 2 seconds, the camera cuts to the next player. Made for a
+  wall or a projector, it shows nothing but the maze and, in one corner, a QR
+  code to this server and a button to join.
 
 No build step for the client and no dependencies for the server: the server
 is a Rust binary built from the standard library alone (HTTP, the WebSocket
 framing and SHA-1 for the handshake included), and the client is plain ES
 modules.
 
-The running version is shown in the HUD and served at `/api/version`.
+The running version is shown in the player's HUD and served at `/api/version`.
 `Cargo.toml` is the only place it is written down: the binary reads it at
 compile time and `flake.nix` parses it.
 
@@ -126,12 +128,14 @@ Walking is `WALK` = 1.7 tiles/s, running `RUN` = 2.8. A perfect run from a
 spawn ~94 tiles out takes about 35 s sprinting, so a round comfortably fits
 inside the two-minute countdown even after a few wrong turns.
 
-Watcher page: `space` / `N` skips to the next player, `F` goes fullscreen.
+Watcher page: `space` / `N` or a click skips to the next player, `F` goes
+fullscreen; none of it is on screen.
 
 On a phone the whole screen is one floating stick: put a thumb down anywhere,
 push up/down to walk, sideways to turn, all the way forward to run. A
 fullscreen button sits above the bottom bar, and the watcher page switches
-players on any tap.
+players on any tap. The watcher's QR code is left out on small screens; nobody
+scans the screen they are holding.
 
 `/?seed=12345` pins a maze locally for testing; it detaches you from the shared
 world, so use it for screenshots rather than racing.
@@ -378,7 +382,9 @@ static/
     interp.js    buffered playback on the server's tick clock
     tags.js      pooled name tags above visible players
     play.js      input, collision, finish detection, round clock
-    watch.js     spectator camera with interpolation and cut banners
+    watch.js     spectator camera with interpolation, no HUD
+    qr.js        QR encoder (byte mode, level M, versions 1-6) for the
+                 watcher's join code
 ```
 
 Both pages generate the maze from the shared seed, so the wire only ever

@@ -139,11 +139,6 @@ body {
   letter-spacing: 0.12em;
 }
 
-.chip.live {
-  color: #fff;
-  border-color: rgba(126, 186, 228, 0.55);
-}
-
 .dot {
   display: inline-block;
   width: 7px;
@@ -239,32 +234,6 @@ kbd {
   letter-spacing: 0.2em;
 }
 
-.banner {
-  position: fixed;
-  left: 50%;
-  top: 22%;
-  z-index: 5;
-  transform: translateX(-50%);
-  padding: 8px 18px;
-  border: 1px solid var(--edge);
-  background: rgba(8, 14, 26, 0.85);
-  color: var(--nix-light);
-  font-size: 15px;
-  letter-spacing: 0.3em;
-  text-transform: uppercase;
-  box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
-}
-
-.banner[data-tone="idle"] {
-  color: #ffd27f;
-  border-color: rgba(255, 210, 127, 0.5);
-}
-
-.banner[data-tone="win"] {
-  color: #b9e6ff;
-  border-color: rgba(185, 230, 255, 0.6);
-}
-
 body.flash #view {
   filter: brightness(2.4) saturate(0.4);
 }
@@ -301,60 +270,52 @@ body.flash #view {
   color: var(--nix-light);
 }
 
-.standby p {
-  margin: 0;
-  opacity: 0.6;
-  letter-spacing: 0.16em;
+/* ---- spectator: the only thing on screen besides the maze ---- */
+
+.join {
+  position: fixed;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 4;
+  display: grid;
+  gap: 8px;
+  justify-items: stretch;
+  width: 128px;
 }
 
-.standby a {
-  color: var(--nix-light);
-}
-
-/* ---- watcher idle meter ---- */
-
-.idle {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.idle-track {
-  display: inline-block;
-  width: 180px;
-  height: 6px;
-  background: rgba(126, 186, 228, 0.15);
-  border: 1px solid var(--edge);
-  border-radius: 2px;
+.qr {
+  line-height: 0;
+  border-radius: 3px;
   overflow: hidden;
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
 }
 
-.idle-bar {
+.qr svg {
+  width: 100%;
+  height: auto;
+}
+
+.join-button {
   display: block;
-  height: 100%;
-  width: 0%;
+  padding: 7px 6px;
+  white-space: nowrap;
+  text-align: center;
+  text-transform: uppercase;
+  text-decoration: none;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
   background: var(--nix-dark);
-  transition: width 0.08s linear;
+  border: 1px solid var(--nix-light);
+  border-radius: 3px;
+  box-shadow: 0 0 18px rgba(82, 119, 195, 0.5);
 }
 
-.idle-bar[data-hot="1"] {
-  background: #ffd27f;
-}
-
-.idle-text {
-  min-width: 78px;
-  color: var(--nix-light);
-}
-
-.idle-note,
-.keys {
-  opacity: 0.55;
-}
-
-.keys {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
+.join-button:hover,
+.join-button:focus-visible {
+  background: var(--nix-light);
+  color: var(--ink);
 }
 
 /* Distinct from the .standby panel class: `.standby img` must not match the
@@ -554,17 +515,12 @@ body.touch .keys-only {
     font-size: 24px;
   }
 
-  .banner {
-    font-size: 12px;
-    letter-spacing: 0.2em;
-    top: 18%;
-  }
-
-  .idle-track {
-    width: 96px;
-  }
-
-  .idle-note {
+  /* Nobody scans a code on the screen they are holding. */
+  .qr {
     display: none;
+  }
+
+  .join {
+    width: auto;
   }
 }

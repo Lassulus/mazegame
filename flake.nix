@@ -276,7 +276,7 @@
                 machine.wait_for_unit("mazegame.service")
                 machine.wait_for_open_port(8080)
                 serves("/", "NIXOS MAZE")
-                serves("/watch", "MAZE CAM")
+                serves("/watch", "join the maze")
                 serves("/js/play.js", "createTouchControls")
                 serves("/img/nix-snowflake.svg", "</svg>")
                 serves("/api/state", "perf")

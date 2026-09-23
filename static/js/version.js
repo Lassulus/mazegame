@@ -1,5 +1,5 @@
 // Shows which build is actually serving the page; the server reads it from
-// mazegame/__init__.py, so HUD, package and flake can never disagree.
+// Cargo.toml at compile time, so HUD, package and flake can never disagree.
 
 export async function showVersion(el) {
   if (!el) return;
