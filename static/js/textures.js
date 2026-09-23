@@ -89,30 +89,50 @@ function brickTexture(size = 64) {
   return px;
 }
 
+// Flat yellow ground: only a faint grain, no stones or grout lines.
 function floorTexture(size = 64) {
   const rnd = mulberry32(0xf100f);
   const px = new Uint32Array(size * size);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const checker = ((x >> 5) ^ (y >> 5)) & 1;
-      const k = checker ? 1 : 0.9; // yellow sandstone flagstones
-      const grout = x % 32 < 2 || y % 32 < 2 ? 0.72 : 1;
-      const n = rnd() * 14 - 7;
-      const f = k * grout;
-      px[y * size + x] = pack(214 * f + n, 178 * f + n, 64 * f + n * 0.5);
-    }
+  for (let i = 0; i < px.length; i++) {
+    const n = rnd() * 8 - 4;
+    px[i] = pack(222 + n, 188 + n, 72 + n * 0.5);
   }
   return px;
 }
 
+// The screensaver's "asbestos" ceiling tile at its original scale: light grey
+// board peppered with white and dark-grey pinholes, a white bevel on the top
+// and left of every tile and a two-pixel shadow on the bottom and right, rows
+// staggered by half a tile.
 function ceilingTexture(size = 64) {
   const rnd = mulberry32(0xcee1);
   const px = new Uint32Array(size * size);
+  const cell = 1; // texels per original pixel
+  const tile = 16; // original pixels per tile
+  const grid = size / cell;
+  const light = 192;
+  const dark = 128;
+  const white = 255;
+  const tone = new Uint8Array(grid * grid);
+  for (let v = 0; v < grid; v++) {
+    const offset = ((v / tile) | 0) % 2 ? tile / 2 : 0;
+    const ty = v % tile;
+    for (let u = 0; u < grid; u++) {
+      const tx = (u + offset) % tile;
+      let c;
+      if (tx >= tile - 2 || ty >= tile - 2) c = dark;
+      else if (tx === 0 || ty === 0) c = white;
+      else {
+        const r = rnd();
+        c = r < 0.5 ? light : r < 0.75 ? dark : white;
+      }
+      tone[v * grid + u] = c;
+    }
+  }
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const beam = y % 32 < 3 ? 22 : 0; // timber joists
-      const n = rnd() * 10 - 5;
-      px[y * size + x] = pack(104 + n + beam, 88 + n + beam, 78 + n + beam);
+      const c = tone[((y / cell) | 0) * grid + ((x / cell) | 0)];
+      px[y * size + x] = pack(c, c, c);
     }
   }
   return px;
