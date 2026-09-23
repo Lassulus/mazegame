@@ -7,7 +7,7 @@ import { buildMaze } from "./maze.js";
 import { Renderer, retroPixel } from "./render.js";
 import { clockTime, makeClock, makeTrack, pushSample, sampleTrack } from "./interp.js";
 import { createSocket } from "./net.js";
-import { qrSvg } from "./qr.js";
+import { drawQr } from "./qr.js";
 
 const PEER_TTL = 8; // snapshots a body may go unmentioned before it is dropped
 
@@ -116,7 +116,7 @@ addEventListener("orientationchange", () => setTimeout(() => renderer.resize(), 
 addEventListener("resize", () => renderer.resize());
 
 // The code points at this very server, so it is right on any deployment.
-document.getElementById("qr").innerHTML = qrSvg(new URL("/", location.href).href);
+drawQr(document.getElementById("qr"), new URL("/", location.href).href);
 
 function frame(now) {
   if (state.maze) {

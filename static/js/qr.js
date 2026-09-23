@@ -43,20 +43,26 @@ export function qrMatrix(text) {
   return best;
 }
 
-// Render as an SVG string: one path, crisp at any size.
-export function qrSvg(text, { margin = 4, dark = "#000", light = "#fff" } = {}) {
+// Draw onto a canvas at a whole number of device pixels per module, so the
+// code is crisp and comes out about `size` CSS pixels wide. A canvas rather
+// than SVG because dark-mode extensions rewrite SVG fill colours and turn the
+// white background dark; nobody rewrites canvas pixels.
+export function drawQr(canvas, text, { size = 128, margin = 4 } = {}) {
   const m = qrMatrix(text);
   const n = m.length + margin * 2;
-  let d = "";
+  const dpr = window.devicePixelRatio || 1;
+  const k = Math.max(1, Math.round((size * dpr) / n));
+  canvas.width = canvas.height = n * k;
+  canvas.style.width = canvas.style.height = `${(n * k) / dpr}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, n * k, n * k);
+  ctx.fillStyle = "#000";
   for (let y = 0; y < m.length; y++) {
     for (let x = 0; x < m.length; x++) {
-      if (m[y][x]) d += `M${x + margin} ${y + margin}h1v1h-1z`;
+      if (m[y][x]) ctx.fillRect((x + margin) * k, (y + margin) * k, k, k);
     }
   }
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${n} ${n}" shape-rendering="crispEdges">` +
-    `<rect width="${n}" height="${n}" fill="${light}"/><path d="${d}" fill="${dark}"/></svg>`
-  );
 }
 
 function rawDataModules(version) {

@@ -280,19 +280,13 @@ body.flash #view {
   display: grid;
   gap: 8px;
   justify-items: stretch;
-  width: 128px;
 }
 
+/* Sized by drawQr to whole device pixels per module; the corner follows. */
 .qr {
-  line-height: 0;
+  display: block;
   border-radius: 3px;
-  overflow: hidden;
   box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
-}
-
-.qr svg {
-  width: 100%;
-  height: auto;
 }
 
 .join-button {
@@ -518,9 +512,5 @@ body.touch .keys-only {
   /* Nobody scans a code on the screen they are holding. */
   .qr {
     display: none;
-  }
-
-  .join {
-    width: auto;
   }
 }
