@@ -1,0 +1,18 @@
+[package]
+name = "mazegame"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Windows 95 style maze you play in a browser tab, with a spectator camera"
+license = "MIT"
+
+# No dependencies on purpose: the HTTP layer, the websocket framing and the
+# snapshot protocol are all a few hundred lines, and the client is plain ES
+# modules with no build step. `cargo build` is the whole story.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

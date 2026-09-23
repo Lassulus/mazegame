@@ -15,18 +15,20 @@ Two pages:
 - `/watch` — **maze cam**: rides along with one random player. When that player
   stops moving for 2 seconds, the camera cuts to the next player.
 
-No build step, no dependencies: the server is Python standard library only
-(including the WebSocket implementation) and the client is plain ES modules.
+No build step for the client and no dependencies for the server: the server
+is a Rust binary built from the standard library alone (HTTP, the WebSocket
+framing and SHA-1 for the handshake included), and the client is plain ES
+modules.
 
 The running version is shown in the HUD and served at `/api/version`.
-`mazegame/__init__.py` is the only place it is written down: `pyproject.toml`
-and `flake.nix` both read `__version__` from there.
+`Cargo.toml` is the only place it is written down: the binary reads it at
+compile time and `flake.nix` parses it.
 
 ## Run
 
 ```sh
 nix run .                       # or: nix run github:you/mazegame
-python3 -m mazegame --port 8080 # straight from a checkout
+cargo run --release -- --port 8080   # straight from a checkout
 ```
 
 Then open <http://127.0.0.1:8080/> to play and <http://127.0.0.1:8080/watch> to
@@ -34,7 +36,12 @@ watch. Bind publicly with `--host 0.0.0.0`.
 
 `--grace SECONDS` changes the countdown that starts at the first escape
 (default 120); handy when testing, since a round otherwise takes two minutes
-to turn over.
+to turn over. `--static DIR` points at the client; it defaults to the
+installed copy next to the binary, then `./static`, so neither `nix run` nor
+`cargo run` needs it.
+
+`nix develop` gives cargo, clippy, rustfmt and rust-analyzer; `cargo test`
+covers the framing, the HTTP layer and the snapshot wire format.
 
 ## Hosting it on NixOS
 
@@ -93,12 +100,13 @@ services.nginx.virtualHosts."maze.example.org" = {
 };
 ```
 
-The server still serves the same files itself, so `python -m mazegame` alone
-is a complete game — the split only matters under load.
+The server still serves the same files itself, so the binary alone is a
+complete game — the split only matters under load.
 
 `overlays.default` exposes `pkgs.mazegame` if you would rather wire the package
 up yourself. `nix flake check` boots a VM, enables the module and talks to the
-running service, so the unit is verified rather than assumed.
+running service — including a real websocket handshake whose snapshot is
+decoded and checked — so the unit is verified rather than assumed.
 
 ## Controls
 
@@ -130,7 +138,7 @@ world, so use it for screenshots rather than racing.
 
 ## Rounds
 
-One maze is live at a time. `hub.Hub` owns the seed; clients rebuild the
+One maze is live at a time. `Hub` (`src/hub.rs`) owns the seed; clients rebuild the
 geometry from it with the same PRNG, so only positions cross the wire. When a
 player reaches the exit the server records their place and time, broadcasts it,
 and — for the first finisher only — arms a `ROUND_GRACE` (120 s) timer. Anyone
@@ -164,22 +172,26 @@ genuinely hidden rather than drawn on top.
 
 Everything here is measured with synthetic clients against one process:
 
-- **One event loop, no threads.** The server was thread-per-connection with
-  blocking writes. At 800 players the hub thread spent *five seconds* inside
-  a single `send` to a client that had stopped reading, every other player
-  froze behind it, and 687 of 813 sampled thread-seconds (py-spy) sat blocked
-  on the hub lock in `move_player`. `server.py` now runs one asyncio loop
-  that owns every socket and the tick.
-- **Snapshots are droppable.** `Conn.send` writes into the transport buffer
-  and checks how much is queued: past `LAG_BYTES` (128 KB) a client stops
-  getting snapshots, past `DEAD_BYTES` (1 MB) the socket is cut. A position
-  frame is state, not history — skipping one costs that client a tick and
-  costs the room nothing. `/api/state` reports `dropped`.
-- **A short lock.** The hub copies the bodies it needs under the lock and
-  selects, encodes and sends outside it. `move_player` takes no lock at all:
-  it is 16k calls a second at 800 players, the writes are atomic under the
-  GIL, and a reader that catches a new x with an old y is off by one frame of
-  walking for one tick.
+- **Written in Rust, a reader and a writer thread per connection.** The
+  Python server was thread-per-connection with blocking writes; at 800
+  players its hub thread spent *five seconds* inside a single `send` to a
+  client that had stopped reading, every other player froze behind it, and
+  687 of 813 sampled thread-seconds (py-spy) sat blocked on the hub lock. An
+  asyncio rewrite fixed the stall; the Rust rewrite removes the interpreter
+  from the budget. The hub thread never touches a socket: every frame goes
+  into a per-connection queue (`src/conn.rs`) drained by that connection's
+  own writer thread, which coalesces whatever piled up into one `write`.
+  Parked threads cost a stack (64-256 KiB each) and nothing else — there is
+  no interpreter lock for them to queue behind.
+- **Snapshots are droppable.** Past `LAG_FRAMES` (16) queued frames a client
+  stops getting position snapshots; past `DEAD_BYTES` (1 MB) the socket is
+  cut. A position frame is state, not history — skipping one costs that client
+  a tick and costs the room nothing. Welcome, world, finish and names messages
+  go through `send_urgent` and are never dropped. `/api/state` reports
+  `dropped`.
+- **A short lock.** One mutex guards the world. The snapshot copies the bodies
+  it needs under it and selects, packs and queues outside it; a position
+  update is a lookup and four stores.
 - **Binary snapshots.** A body is twelve bytes — `u32` id, `u16` x, `u16` y,
   `u16` angle, flags, age — not forty-odd characters of JSON with the name
   repeated every tick. Names go out once per viewer in a `names` message and
@@ -248,10 +260,14 @@ Everything here is measured with synthetic clients against one process:
 - **Cheap ops endpoint.** `/api/state` answers with counters and tick timings
   (`build_ms`, `send_ms`, `frames`, `slow`, `dropped`); the per-player roster
   is behind `?full=1`, because serialising 800 players on every poll is real
-  work on the loop that runs the game.
-- **Accept backlog.** A link going around arrives as a burst of SYNs, so the
-  listener uses a backlog of 512 rather than the stdlib's 5.
-- **Limits.** One socket per player: the unit sets `LimitNOFILE = 65536`;
+  work under the lock the game runs on.
+- **Accept backlog.** A link going around arrives as a burst of SYNs. `std`
+  listens with a backlog of 128 and offers no knob, so a burst beyond it waits
+  for the kernel's one-second SYN retry rather than being refused: 1500
+  simultaneous handshakes all succeeded, p50 132 ms, p99 1.09 s. The accept
+  thread only spawns a reader, so the queue drains as fast as it fills.
+- **Limits.** One socket and two threads per player: the unit sets
+  `LimitNOFILE = 65536` and `TasksMax = 8192`;
   systemd's default of 1024 otherwise caps the server at about a thousand
   players. nginx needs raising too — its default single worker with 512
   connections caps you at ~250 players, since a proxied websocket costs two
@@ -265,15 +281,23 @@ Everything here is measured with synthetic clients against one process:
   existence as bodies swapped depth order. The minimap's static layer is
   cached instead of repainting 2601 tiles every frame.
 
-Measured on one core, players scattered and walking, snapshot gap seen by the
-clients themselves:
+Snapshot gap seen by the clients themselves, players scattered and walking.
+The first two columns are the Python server before and after the event loop;
+the last is this one:
 
-| players | before | now |
-| --- | --- | --- |
-| 200 | 177 ms p50 | 92 ms p50, 162 ms p99 |
-| 400 | 399 ms p50 | 97 ms p50, 196 ms p99 |
-| 800 | 1666 ms p50, connections timing out | 146 ms p50, 289 ms p99, zero errors |
-| 1200 | — | 243 ms p50, all 1200 connected |
+| players | Python, threads | Python, asyncio | Rust |
+| --- | --- | --- | --- |
+| 200 | 177 ms p50 | 92 ms p50, 162 ms p99 | |
+| 400 | 399 ms p50 | 97 ms p50, 196 ms p99 | 100 ms p50, 106 ms p99 |
+| 800 | 1666 ms p50, connections timing out | 146 ms p50, 289 ms p99 | 150 ms p50, 159 ms p99 |
+| 1200 | — | 243 ms p50, all 1200 connected | |
+
+Side by side on one laptop, 800 players packed into a 22-tile radius, same
+bots: Python spent 19.7 ms building and 8.9 ms queueing each snapshot with a
+201 ms p99 gap; Rust spends 2.5 ms and 3.9 ms with a 159 ms p99, in 41 MB.
+Watching a player at 800 the spectator camera moved at a steady pace (speed
+CV 0.08, 5th-95th percentile within ±2 %) with no frame over 17 ms and no
+freeze, and a manual cut lands on the next player in 32-48 ms.
 
 ## Maze shape
 
@@ -308,23 +332,34 @@ Players are told when a camera is on them ("ON CAMERA" badge, top left).
 ## Layout
 
 ```
-mazegame/
-  ws.py       RFC 6455 framing: incremental parser, no socket of its own
-  hub.py      players, watchers, idle detection, switching policy, snapshots
-  server.py   asyncio HTTP + /ws/play, /ws/watch, /api/state, the tick
-  static/js/
-    maze.js      seeded recursive-backtracker maze (25x25 cells = 51x51 tiles);
-                 exit = furthest dead end from spawn
+src/
+  main.rs     flags, the tick thread, the listener
+  net.rs      accept loop, HTTP routing, websocket upgrade and read loop
+  conn.rs     per-connection write queue and writer thread; drops snapshots
+              for clients that fall behind
+  hub.rs      players, watchers, rounds, idle detection, switching policy,
+              interest search and the binary snapshot format
+  http.rs     request parsing, static file cache, response writer
+  ws.rs       RFC 6455 framing: incremental parser, SHA-1 + base64 handshake
+  json.rs     string quoting for control messages; field lookup for the two
+              message shapes clients send
+  sync.rs     lock helpers without poisoning ceremony
+static/
+  js/
+    maze.js      seeded Prim maze (25x25 cells = 51x51 tiles), braided;
+                 exit = furthest dead end from the spawn band
     textures.js  procedural brick/floor/ceiling, the NixOS logo panel and the
                  player pawn, pre-shaded into 24 brightness levels
     render.js    DDA raycaster, floor/ceiling casting, pawn sprites, minimap
+    net.js       reconnecting socket; decodes binary snapshots
+    interp.js    buffered playback on the server's tick clock
     tags.js      pooled name tags above visible players
     play.js      input, collision, finish detection, round clock
     watch.js     spectator camera with interpolation and cut banners
 ```
 
 Both pages generate the maze from the shared seed, so the wire only ever
-carries `{id, x, y, a, finished}` tuples.
+carries twelve-byte bodies and, once per viewer, names.
 
 Clients heartbeat every 3 s; the server hangs up on a socket that goes quiet for
 12 s, so a backgrounded or crashed tab cannot hold a slot in the camera rotation.

@@ -14,24 +14,31 @@
       ];
       forAllSystems = fn: nixpkgs.lib.genAttrs systems (system: fn nixpkgs.legacyPackages.${system});
 
-      # One source of truth for the version: mazegame/__init__.py.
+      # One source of truth for the version: the [package] table in Cargo.toml.
+      # The newline in the pattern keeps `rust-version` from being picked up
+      # instead, since only the real key starts its line with "version".
       version = builtins.head (
-        builtins.match ".*__version__ = \"([^\"]+)\".*" (builtins.readFile ./mazegame/__init__.py)
+        builtins.match ".*\nversion = \"([^\"]+)\".*" (builtins.readFile ./Cargo.toml)
       );
 
       mkMazegame =
         pkgs:
         let
-          package = pkgs.python3Packages.buildPythonApplication {
+          package = pkgs.rustPlatform.buildRustPackage {
             pname = "mazegame";
             inherit version;
-            pyproject = true;
             src = ./.;
-            build-system = [ pkgs.python3Packages.setuptools ];
-            doCheck = false;
-            # The site as installed, so a web server can hand out the client
-            # straight from the store and leave the event loop to the game.
-            passthru.static = "${package}/${pkgs.python3.sitePackages}/mazegame/static";
+            cargoLock.lockFile = ./Cargo.lock;
+            # The client is data, not code, and the binary has no compiled-in
+            # path to it: install it where the module's --static can point and
+            # a web server can read it straight from the store.
+            postInstall = ''
+              mkdir -p $out/share/mazegame
+              cp -r static $out/share/mazegame/static
+            '';
+            # The site as installed, so nginx can hand out the client without
+            # going through the game loop at all.
+            passthru.static = "${package}/share/mazegame/static";
             meta = {
               description = "Browser maze game with a spectator camera; the exit is the NixOS logo";
               mainProgram = "mazegame";
@@ -97,13 +104,15 @@
                   "--host ${cfg.host}"
                   "--port ${toString cfg.port}"
                   "--grace ${toString cfg.roundGrace}"
+                  "--static ${cfg.package.static}"
                   "--quiet"
                 ];
                 Restart = "on-failure";
-                # One socket per connected player, all on one event loop; the
-                # systemd default of 1024 file descriptors caps the server at
-                # roughly a thousand players.
+                # One socket per connected player; the systemd default of 1024
+                # file descriptors caps the server at roughly a thousand
+                # players.
                 LimitNOFILE = 65536;
+                # A reader and a writer thread per connection.
                 TasksMax = 8192;
                 DynamicUser = true;
                 NoNewPrivileges = true;
@@ -133,6 +142,10 @@
 
       overlays.default = final: _prev: { mazegame = mkMazegame final; };
 
+      # nixfmt-tree, not bare nixfmt: plain `nix fmt` hands the formatter a
+      # directory, which nixfmt itself now refuses.
+      formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
+
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";
@@ -143,8 +156,11 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = [
-            pkgs.python3
-            pkgs.ruff
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.clippy
+            pkgs.rustfmt
+            pkgs.rust-analyzer
           ];
         };
       });

@@ -1,7 +1,3 @@
-__pycache__/
-*.py[cod]
+/target
 result
 result-*
-build/
-dist/
-*.egg-info/
