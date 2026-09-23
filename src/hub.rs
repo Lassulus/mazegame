@@ -303,19 +303,20 @@ impl Hub {
             last_escape: None,
             known: Vec::new(),
         };
-        let welcome = {
-            let mut state = lock(&self.state);
-            state.players.push(player);
-            let count = state.players.len();
-            let name = &state.players[count - 1].name;
-            format!(
-                "{{\"t\":\"welcome\",\"id\":{},\"name\":{},\"players\":{},{}}}",
-                pid,
-                json::quote(name),
-                count,
-                Self::world_members(&state, now)
-            )
-        };
+        // Queued while the lock is still held: the moment the player is in
+        // the roster the tick can snapshot them, and a snapshot must not
+        // reach the client ahead of the welcome that tells it who it is.
+        // Lock order is always hub state, then a connection's own queue.
+        let mut state = lock(&self.state);
+        state.players.push(player);
+        let count = state.players.len();
+        let welcome = format!(
+            "{{\"t\":\"welcome\",\"id\":{},\"name\":{},\"players\":{},{}}}",
+            pid,
+            json::quote(&state.players[count - 1].name),
+            count,
+            Self::world_members(&state, now)
+        );
         conn.send_urgent(Arc::new(text_frame(&welcome)));
         pid
     }
@@ -499,28 +500,23 @@ impl Hub {
 
     fn retarget(&self, wid: u32, reason: &str, randomize: bool) {
         let now = Instant::now();
-        let (conn, payload, previous, current) = {
+        let (previous, current) = {
             let mut state = lock(&self.state);
             let Some(index) = state.watchers.iter().position(|w| w.wid == wid) else {
                 return;
             };
             let previous = state.watchers[index].target;
-            if state.players.is_empty() {
-                let watcher = &mut state.watchers[index];
-                watcher.target = None;
-                watcher.since = now;
-                let conn = Arc::clone(&watcher.conn);
-                let payload =
-                    format!("{{\"t\":\"idle_pool\",\"reason\":\"{reason}\",\"players\":0}}");
-                (conn, payload, previous, None)
+            let (payload, current) = if state.players.is_empty() {
+                (
+                    format!("{{\"t\":\"idle_pool\",\"reason\":\"{reason}\",\"players\":0}}"),
+                    None,
+                )
             } else {
                 let Some(pick) =
                     Self::next_player(&state, previous, randomize, now, self.idle_switch)
                 else {
                     return; // nobody else to switch to; keep watching
                 };
-                let players = state.players.len();
-                let world = Self::world_members(&state, now);
                 let player = state
                     .players
                     .iter()
@@ -529,22 +525,26 @@ impl Hub {
                 let payload = format!(
                     "{{\"t\":\"watch\",\"reason\":\"{}\",\"players\":{},\"id\":{},\"name\":{},\"placed\":{},\"x\":{:.4},\"y\":{:.4},\"a\":{:.4},{}}}",
                     reason,
-                    players,
+                    state.players.len(),
                     pick,
                     json::quote(&player.name),
                     player.placed,
                     player.x,
                     player.y,
                     player.a,
-                    world
+                    Self::world_members(&state, now)
                 );
-                let watcher = &mut state.watchers[index];
-                watcher.target = Some(pick);
-                watcher.since = now;
-                (Arc::clone(&watcher.conn), payload, previous, Some(pick))
-            }
+                (payload, Some(pick))
+            };
+            let watcher = &mut state.watchers[index];
+            watcher.target = current;
+            watcher.since = now;
+            // Queued before the lock is released, for the same reason as the
+            // welcome: the next snapshot is centred on the new target, and the
+            // camera must know who that is before it arrives.
+            watcher.conn.send_urgent(Arc::new(text_frame(&payload)));
+            (previous, current)
         };
-        conn.send_urgent(Arc::new(text_frame(&payload)));
         let mut touched: Vec<u32> = Vec::new();
         touched.extend(previous);
         touched.extend(current);

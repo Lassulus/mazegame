@@ -204,14 +204,20 @@
                           f"Sec-WebSocket-Key: {key}\r\n"
                           "Sec-WebSocket-Version: 13\r\n\r\n".encode()
                       )
-                      head = b""
-                      while b"\r\n\r\n" not in head:
-                          head += sock.recv(4096)
-                      assert b"101 Switching Protocols" in head, head
-                      return sock
+                      # One buffered reader for the handshake and every frame
+                      # after it: the first frame can arrive in the same
+                      # segment as the 101, and a raw recv() for the headers
+                      # would swallow it.
+                      stream = sock.makefile("rb")
+                      status = stream.readline()
+                      assert b"101 Switching Protocols" in status, status
+                      while stream.readline() not in (b"\r\n", b""):
+                          pass
+                      return sock, stream
 
 
-                  def send(sock, payload):
+                  def send(conn, payload):
+                      sock, _ = conn
                       body = json.dumps(payload).encode()
                       mask = os.urandom(4)
                       sock.sendall(
@@ -221,16 +227,14 @@
                       )
 
 
-                  def frame(sock):
-                      first = sock.recv(2)
+                  def frame(conn):
+                      _, stream = conn
+                      first = stream.read(2)
                       opcode = first[0] & 0x0F
                       size = first[1] & 0x7F
                       if size == 126:
-                          size = struct.unpack("!H", sock.recv(2))[0]
-                      data = b""
-                      while len(data) < size:
-                          data += sock.recv(size - len(data))
-                      return opcode, data
+                          size = struct.unpack("!H", stream.read(2))[0]
+                      return opcode, stream.read(size)
 
 
                   player = connect("/ws/play?name=probe")
@@ -262,15 +266,22 @@
                 '';
               in
               ''
+                # Fetch, then match: `curl | grep -q` fails at random, because
+                # grep exits at the first match and curl dies writing the rest
+                # of the body into a closed pipe (exit 23).
+                def serves(path, needle):
+                    machine.succeed(f"curl -sf 'http://127.0.0.1:8080{path}' -o /tmp/body")
+                    machine.succeed(f"grep -qF -- '{needle}' /tmp/body")
+
                 machine.wait_for_unit("mazegame.service")
                 machine.wait_for_open_port(8080)
-                machine.succeed("curl -sf http://127.0.0.1:8080/ | grep -q 'NIXOS MAZE'")
-                machine.succeed("curl -sf http://127.0.0.1:8080/watch | grep -q 'MAZE CAM'")
-                machine.succeed("curl -sf http://127.0.0.1:8080/js/play.js | grep -q createTouchControls")
-                machine.succeed("curl -sf http://127.0.0.1:8080/img/nix-snowflake.svg | grep -q '</svg>'")
-                machine.succeed("curl -sf http://127.0.0.1:8080/api/state | grep -q perf")
-                machine.succeed("curl -sf 'http://127.0.0.1:8080/api/state?full=1' | grep -q players")
-                machine.succeed("${wsProbe} | grep -q 'websocket ok'")
+                serves("/", "NIXOS MAZE")
+                serves("/watch", "MAZE CAM")
+                serves("/js/play.js", "createTouchControls")
+                serves("/img/nix-snowflake.svg", "</svg>")
+                serves("/api/state", "perf")
+                serves("/api/state?full=1", "players")
+                assert "websocket ok" in machine.succeed("${wsProbe}")
                 machine.succeed("systemctl show -p DynamicUser mazegame.service | grep -q DynamicUser=yes")
               '';
           };
