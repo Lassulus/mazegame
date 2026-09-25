@@ -31,7 +31,8 @@ pub fn quote(text: &str) -> String {
 }
 
 /// One field out of a flat JSON object, without building a parser: the client
-/// only ever sends `{"t":"pos","x":…,"y":…,"a":…}` and `{"t":"skip"}`.
+/// only ever sends `{"t":"pos","x":…,"y":…,"a":…,"c":…,"f":0|1}`,
+/// `{"t":"escaped"}` and `{"t":"skip"}`.
 pub fn field<'a>(message: &'a str, name: &str) -> Option<&'a str> {
     let needle = format!("\"{name}\"");
     let at = message.find(&needle)? + needle.len();

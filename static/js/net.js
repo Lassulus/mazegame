@@ -1,19 +1,27 @@
 // Tiny reconnecting WebSocket client. Control traffic is JSON; position
-// snapshots arrive as binary, eleven bytes a body, and are decoded here so
-// the pages only ever see `{ t: "peers", … }`.
+// snapshots arrive as binary, twelve bytes a body plus five a ghost, and are
+// decoded here so the pages only ever see `{ t: "peers", … }`.
 
 const HEARTBEAT_MS = 3000; // server drops sockets that go quiet
 const PEERS_FRAME = 1;
 const POS_SCALE = 1000; // world units per unit of the u16 position field
 const ANGLE_SCALE = (Math.PI * 2) / 65536;
 const BODY = 12; // bytes: u32 id, u16 x, u16 y, u16 angle, u8 flags, u8 age
+const GHOST = 5; // bytes: u8 id, u16 x, u16 y
 const HEAD = 10; // bytes: u8 type, u8 hz, u16 players, u32 tick clock, u16 count
 const AGE_STEP = 2; // ms per unit of the age field
 
-// { t, hz, n, clock, l: [[id, x, y, angle, finished, age], …] }. Names are no
-// longer in here — they arrive once, in their own message — and every body
-// carries how stale it was when the snapshot went out, so playback can put it
-// where it actually was rather than where the tick happened to catch it.
+// Bits of a body's flags byte.
+export const FINISHED = 1; // escaped this round (drawn NixOS blue)
+export const FLIPPED = 2; // walking on the ceiling
+export const POWERED = 4; // ate a cherry and can eat ghosts
+
+// { t, hz, n, clock, l: [[id, x, y, angle, flags, age], …], g: [[id, x, y], …] }.
+// Names are not in here — they arrive once, in their own message — and
+// every body carries how stale it was when the snapshot went out, so
+// playback can put it where it actually was rather than where the tick
+// happened to catch it. Ghosts follow the bodies: every living one, every
+// frame, true at the tick itself.
 function decodePeers(buffer) {
   const view = new DataView(buffer);
   if (view.byteLength < HEAD || view.getUint8(0) !== PEERS_FRAME) return null;
@@ -29,11 +37,23 @@ function decodePeers(buffer) {
       view.getUint16(at + 4, true) / POS_SCALE,
       view.getUint16(at + 6, true) / POS_SCALE,
       view.getUint16(at + 8, true) * ANGLE_SCALE,
-      view.getUint8(at + 10) & 1,
+      view.getUint8(at + 10),
       view.getUint8(at + 11) * AGE_STEP,
     ];
   }
-  return { t: "peers", hz, n, clock, l: list };
+  let at = HEAD + count * BODY;
+  const ghosts = [];
+  if (at < view.byteLength) {
+    const living = view.getUint8(at++);
+    for (let i = 0; i < living && at + GHOST <= view.byteLength; i++, at += GHOST) {
+      ghosts.push([
+        view.getUint8(at),
+        view.getUint16(at + 1, true) / POS_SCALE,
+        view.getUint16(at + 3, true) / POS_SCALE,
+      ]);
+    }
+  }
+  return { t: "peers", hz, n, clock, l: list, g: ghosts };
 }
 
 export function createSocket(path, { onMessage, onOpen, onStatus } = {}) {

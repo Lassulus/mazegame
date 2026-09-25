@@ -1,7 +1,9 @@
 # mazegame
 
-A Windows 95 "Maze" screensaver you can actually play, in a browser tab.
-Brick corridors, a pixelated raycaster, and an exit made of the NixOS snowflake.
+A Windows 95 "Maze" screensaver you can actually play, in a browser tab, as
+first-person Pac-Man. Brick corridors, a pixelated raycaster, ghosts that hunt
+you, cherries that turn the tables, the screensaver's grey rocks that put you
+on the ceiling, and an exit made of the NixOS snowflake.
 
 Everyone shares one 51x51 maze and sees the other wanderers as coloured pawns
 with name tags. The first player to touch the snowflake starts a two-minute
@@ -127,7 +129,8 @@ tooling.
 
 Walking is `WALK` = 1.7 tiles/s, running `RUN` = 2.8. A perfect run from a
 spawn ~94 tiles out takes about 35 s sprinting, so a round comfortably fits
-inside the two-minute countdown even after a few wrong turns.
+inside the two-minute countdown even after a few wrong turns — and a ghost
+on your tail chases at 1.9, so it can be outrun but not out-walked.
 
 Watcher page: `space` / `N` or a click skips to the next player, `F` goes
 fullscreen; none of it is on screen.
@@ -140,6 +143,46 @@ scans the screen they are holding.
 
 `/?seed=12345` pins a maze locally for testing; it detaches you from the shared
 world, so use it for screenshots rather than racing.
+
+## Ghosts, cherries and the ceiling
+
+The ghosts are shared: one set of `GHOSTS` (6) for the whole world, run by the
+server (`src/pac.rs`) so everyone sees the same ghost in the same corridor and
+eating one removes it for everybody. To do that the server needs the walls,
+so `src/maze.rs` is a byte-for-byte port of `maze.js`; a test pins grid
+checksums and exits for a handful of seeds against the JavaScript.
+
+- **Ghosts** start in the middle band of the maze (20-65 % of the longest walk
+  from the logo, short of the spawn band) and move tile to tile like the
+  arcade ones: never reversing except in a dead end, never into the logo.
+  At each junction a ghost looks for the nearest player within 9 tiles as the
+  crow flies and 14 tiles of actual walk. An ordinary player is chased at 1.9
+  tiles/s along the shortest path; a powered one is fled from at 1.2; with
+  nobody about it wanders at 1.5.
+- **Caught.** A ghost within half a tile of you sends `caught`: the card holds
+  you for 1.4 s and drops you back at this maze's start. The server leaves you
+  alone for `SAFE_TIME` (3 s) so the stale position it has on file cannot be
+  caught twice; an escape and a new round grant the same grace.
+- **Cherries.** `CHERRIES` (4) lie in the maze, first come first served. Eat
+  one and you have `POWER_TIME` (8 s) of power — the `cherry` chip counts it
+  down, every ghost turns blue for you and blinks white for the last two
+  seconds — while that cherry reappears somewhere at least 8 tiles away. Walk
+  into a ghost while powered and it is gone for 6 s, then comes back at least
+  10 tiles from every player.
+- **Rocks.** Each maze also holds eight of the screensaver's spinning grey
+  Platonic solids (tetrahedron, octahedron, icosahedron, dodecahedron). Touch
+  one and the view turns over about the line of sight and you walk on the
+  ceiling; touch another and you are back on your feet. They are yours alone:
+  placed from the seed on its own PRNG stream, used up for the rest of the
+  trip once touched, and all back (with you upright) when you respawn. Upside
+  down, left and right trade places on screen, so turning and strafing follow
+  the picture and still feel the same way round.
+
+Only the result of a rock crosses the wire: the `pos` message carries `f`, and
+bit 1 of a body's flags tells everyone else, who then see you hanging head
+down from the ceiling. Bit 2 marks a powered player, which the maze cam uses
+to show the ghosts the way the watched player sees them. The minimap shows
+ghosts and cherries only on tiles you have already walked.
 
 ## Rounds
 
@@ -302,12 +345,13 @@ Everything here is measured with synthetic clients against one process:
   connections.
 - **Client fill budget.** A crowd standing in one room could cost several
   full-screen sprite fills per frame, so the renderer spends a budget of
-  `PAWN_FILL_BUDGET` (2.5) screenfuls on the nearest pawns. The budget is in
-  pixels, which lets a hundred distant pawns through while still cutting a
-  wall of enormous near ones; `MAX_PAWNS` (64) is only a backstop. It used to
-  be a hard cap of ten, which is what made a crowd churn in and out of
-  existence as bodies swapped depth order. The minimap's static layer is
-  cached instead of repainting 2601 tiles every frame.
+  `SPRITE_FILL_BUDGET` (2.5) screenfuls on the nearest sprites — pawns,
+  ghosts, cherries and rocks alike. The budget is in pixels, which lets a
+  hundred distant pawns through while still cutting a wall of enormous near
+  ones; `MAX_SPRITES` (64) is only a backstop. It used to be a hard cap of
+  ten, which is what made a crowd churn in and out of existence as bodies
+  swapped depth order. The minimap's static layer is cached instead of
+  repainting 2601 tiles every frame.
 
 Snapshot gap seen by the clients themselves, players scattered and walking.
 The first two columns are the Python server before and after the event loop;
@@ -366,7 +410,10 @@ src/
   conn.rs     per-connection write queue and writer thread; drops snapshots
               for clients that fall behind
   hub.rs      players, watchers, rounds, idle detection, switching policy,
-              interest search and the binary snapshot format
+              interest search, cherry pickups, catches and the binary
+              snapshot format
+  maze.rs     byte-for-byte port of maze.js, so the ghosts know the walls
+  pac.rs      ghosts (chase, flee, wander, respawn) and cherries
   http.rs     request parsing, static file cache, response writer
   ws.rs       RFC 6455 framing: incremental parser, SHA-1 + base64 handshake
   json.rs     string quoting for control messages; field lookup for the two
@@ -375,21 +422,24 @@ src/
 static/
   js/
     maze.js      seeded Prim maze (25x25 cells = 51x51 tiles), braided;
-                 exit = furthest dead end from the spawn band
-    textures.js  procedural brick/floor/ceiling, the NixOS logo panel and the
-                 player pawn, pre-shaded into 24 brightness levels
-    render.js    DDA raycaster, floor/ceiling casting, pawn sprites, minimap
+                 exit = furthest dead end from the spawn band; grey rocks
+    textures.js  procedural brick/floor/ceiling, the NixOS logo panel, the
+                 player pawn, ghosts, cherries and the spinning rocks
+    render.js    DDA raycaster, floor/ceiling casting, sprites, the roll onto
+                 the ceiling, minimap
     net.js       reconnecting socket; decodes binary snapshots
-    interp.js    buffered playback on the server's tick clock
+    interp.js    buffered playback on the server's tick clock, bodies and ghosts
     tags.js      pooled name tags above visible players
-    play.js      input, collision, finish detection, round clock
+    play.js      input, collision, finish detection, rocks, cherry power,
+                 catches, round clock
     watch.js     spectator camera with interpolation, no HUD
     qr.js        QR encoder (byte mode, level M, versions 1-6) for the
                  watcher's join code
 ```
 
 Both pages generate the maze from the shared seed, so the wire only ever
-carries twelve-byte bodies and, once per viewer, names.
+carries twelve-byte bodies, five-byte ghosts, cherry cells when they change
+and, once per viewer, names.
 
 Clients heartbeat every 3 s; the server hangs up on a socket that goes quiet for
 12 s, so a backgrounded or crashed tab cannot hold a slot in the camera rotation.

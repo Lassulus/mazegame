@@ -1,11 +1,15 @@
 // Player view: everyone walks the same maze, sees each other, and races the
-// countdown that starts when the first player reaches the NixOS logo.
+// countdown that starts when the first player reaches the NixOS logo. Ghosts
+// hunt the corridors on the way; a cherry turns the tables for a while, and
+// the screensaver's grey rocks turn the world upside down.
 
-import { WIN_DWELL, buildMaze, solid, spawnFor } from "./maze.js";
-import { Renderer, drawMinimap, retroPixel } from "./render.js";
-import { createSocket } from "./net.js";
+import { WIN_DWELL, buildMaze, rockAt, solid, spawnFor } from "./maze.js";
+import { Renderer, drawMinimap, retroPixel, rollAngle, stepRoll } from "./render.js";
+import { FINISHED, FLIPPED, POWERED, createSocket } from "./net.js";
 import { createTags } from "./tags.js";
-import { clockTime, makeClock, makeTrack, pushSample, sampleTrack } from "./interp.js";
+import {
+  clockTime, liveGhosts, makeClock, makeTrack, pushSample, sampleTrack, syncGhosts,
+} from "./interp.js";
 import { createTouchControls, isTouch, wireFullscreen } from "./touch.js";
 import { showVersion } from "./version.js";
 
@@ -20,6 +24,7 @@ const WIN_DIST = 0.9;
 // much longer than that and it has genuinely walked out of range, so holding
 // on to it would leave a pawn standing in an empty corridor.
 const PEER_TTL = 8; // snapshots a body may go unmentioned before it is dropped
+const CAUGHT_DWELL = 1400; // ms the "caught" card holds you before the walk home
 
 const view = document.getElementById("view");
 const minimap = document.getElementById("minimap");
@@ -34,6 +39,8 @@ const elStatus = document.getElementById("status");
 const elOverlay = document.getElementById("overlay");
 const elOverlayText = document.getElementById("overlay-text");
 const elName = document.getElementById("playername");
+const elPower = document.getElementById("power");
+const elPowerLeft = document.getElementById("power-left");
 
 const renderer = new Renderer(view, { pixel: retroPixel() });
 const keys = new Set();
@@ -53,7 +60,13 @@ const state = {
   runStartedAt: performance.now(), // this trip's clock, reset on every spawn
   id: null,
   names: new Map(), // player id -> name
-  peers: new Map(), // player id -> { id, x, y, a, finished }
+  peers: new Map(), // player id -> { id, x, y, a, finished, flipped }
+  ghosts: new Map(), // ghost id -> { id, x, y, track }
+  cherries: [], // [{ x, y }], shared: the first to reach one takes it
+  powerUntil: 0, // performance.now() when our cherry power runs out
+  upside: false, // walking on the ceiling (toggled by the grey rocks)
+  flip: 0, // how far the view has turned over, 0..1
+  taken: new Set(), // rocks used up on this trip
   endsAt: null, // performance.now() deadline for the world rollover
   sendHz: SEND_HZ, // position updates per second, paced by the server
   clock: makeClock(), // maps the server's tick clock into local time
@@ -68,9 +81,15 @@ function setMaze(seed) {
   state.escapes = 0;
   state.holdUntil = 0;
   state.respawns = 0;
+  state.powerUntil = 0;
+  state.ghosts.clear();
   visited.clear();
   // Own corner of the map, jittered so two players sharing one never stack.
   placeAt(spawnFor(state.maze, state.id));
+}
+
+function setCherries(list) {
+  state.cherries = (list || []).map(([x, y]) => ({ x: x + 0.5, y: y + 0.5 }));
 }
 
 function markVisited() {
@@ -109,6 +128,7 @@ function connect(name) {
         for (const f of msg.finishers) note(`${f.name} escaped · ${ordinal(f.place)}`);
       } else if (msg.t === "world") {
         setMaze(msg.seed);
+        setCherries(msg.cherries);
         state.endsAt = null;
         note(msg.winner ? `new maze · ${msg.winner} won the last one` : "new maze");
       } else if (msg.t === "peers") {
@@ -126,6 +146,15 @@ function connect(name) {
       } else if (msg.t === "watched") {
         elWatchers.textContent = msg.n;
         elWatched.classList.toggle("hidden", msg.n === 0);
+      } else if (msg.t === "cherries") {
+        setCherries(msg.l);
+      } else if (msg.t === "power") {
+        state.powerUntil = performance.now() + msg.ms;
+        note("cherry! the ghosts are yours");
+      } else if (msg.t === "ate") {
+        note("you ate a ghost");
+      } else if (msg.t === "caught") {
+        caught();
       }
     },
   });
@@ -133,6 +162,7 @@ function connect(name) {
 
 function applyWorld(world) {
   setMaze(world.seed);
+  setCherries(world.cherries);
   state.endsAt = world.ends_in === null ? null : performance.now() + world.ends_in * 1000;
 }
 
@@ -149,19 +179,22 @@ function applyPeers(msg) {
   // Snapshots are laid out on the server's clock, not on their arrival time.
   const arrived = performance.now();
   const now = clockTime(state.clock, msg.clock, arrived);
-  for (const [id, x, y, a, finished, age] of msg.l) {
+  for (const [id, x, y, a, flags, age] of msg.l) {
     if (id === state.id) continue; // that one is us
     let peer = state.peers.get(id);
     if (!peer) {
-      peer = { id, track: makeTrack(x, y, a), x, y, a, finished: !!finished };
+      peer = { id, track: makeTrack(x, y, a), x, y, a };
       state.peers.set(id, peer);
     }
-    peer.finished = !!finished;
+    peer.finished = !!(flags & FINISHED);
+    peer.flipped = !!(flags & FLIPPED);
+    peer.powered = !!(flags & POWERED);
     peer.seen = now;
     // `age` is how stale the body was when the tick sampled it, so the sample
     // lands where it belongs on the timeline instead of on the tick boundary.
     pushSample(peer.track, x, y, a, now - age, arrived);
   }
+  syncGhosts(state.ghosts, msg.g, now, arrived);
   // Interest lists churn at the edges: in a crowd a body drops out of the
   // nearest twenty for a tick and comes straight back. Forgetting it on the
   // first miss threw away its interpolation history and made pawns blink.
@@ -208,7 +241,9 @@ function pushPosition(now) {
   // `c` is when this position was true on our clock. The server maps it onto
   // its own, so a packet that sat in a queue on the way still plays back at
   // the moment it happened instead of when it finally arrived.
-  socket.send({ t: "pos", x: state.cam.x, y: state.cam.y, a: state.cam.a, c: Math.round(now) });
+  socket.send({
+    t: "pos", x: state.cam.x, y: state.cam.y, a: state.cam.a, c: Math.round(now), f: state.upside ? 1 : 0,
+  });
 }
 
 // -- input ---------------------------------------------------------------
@@ -237,8 +272,14 @@ addEventListener("blur", () => keys.clear());
 view.addEventListener("click", () => {
   if (!isTouch) view.requestPointerLock();
 });
+// Past a quarter turn the picture is upside down, and so is left and right:
+// what was your right hand is now on the other side of the screen. Turning
+// and strafing follow the picture, so the controls still feel the same way
+// round.
+const handedness = () => (state.flip > 0.5 ? -1 : 1);
+
 document.addEventListener("mousemove", (e) => {
-  if (document.pointerLockElement === view) state.cam.a += e.movementX * MOUSE;
+  if (document.pointerLockElement === view) state.cam.a += e.movementX * MOUSE * handedness();
 });
 
 const touchpad = document.getElementById("touchpad");
@@ -279,11 +320,12 @@ function step(dt) {
   let strafe = 0;
   if (keys.has("KeyW") || keys.has("ArrowUp")) forward += 1;
   if (keys.has("KeyS") || keys.has("ArrowDown")) forward -= 1;
-  if (keys.has("KeyD")) strafe += 1;
-  if (keys.has("KeyA")) strafe -= 1;
-  if (keys.has("ArrowLeft") || keys.has("KeyQ")) cam.a -= TURN * dt;
-  if (keys.has("ArrowRight") || keys.has("KeyE")) cam.a += TURN * dt;
-  cam.a += touch.steer * TURN * dt;
+  const hand = handedness();
+  if (keys.has("KeyD")) strafe += hand;
+  if (keys.has("KeyA")) strafe -= hand;
+  if (keys.has("ArrowLeft") || keys.has("KeyQ")) cam.a -= TURN * dt * hand;
+  if (keys.has("ArrowRight") || keys.has("KeyE")) cam.a += TURN * dt * hand;
+  cam.a += touch.steer * TURN * dt * hand;
 
   const mag = Math.hypot(forward, strafe);
   if (mag > 0.02) {
@@ -298,9 +340,29 @@ function step(dt) {
     markVisited();
   }
 
+  // Touching a grey rock turns you over (or back); it is gone for the rest
+  // of this trip.
+  const rock = rockAt(maze, cam.x, cam.y, state.taken);
+  if (rock >= 0) {
+    state.taken.add(rock);
+    state.upside = !state.upside;
+  }
+
   // No one-shot gate: every trip through the logo counts. The dwell freeze
   // above keeps the same arrival from firing twice.
   if (Math.hypot(cam.x - maze.exit.x, cam.y - maze.exit.y) < WIN_DIST) win();
+}
+
+// A ghost got you. The server has already made you untouchable for a few
+// seconds; show the card, then walk you home to where this maze started you.
+function caught() {
+  if (!state.maze) return;
+  state.holdUntil = performance.now() + CAUGHT_DWELL;
+  showOverlay("<strong>CAUGHT</strong><br><small>back to the start</small>", "caught");
+  setTimeout(() => {
+    hideOverlay();
+    placeAt(spawnFor(state.maze, state.id));
+  }, CAUGHT_DWELL);
 }
 
 function win() {
@@ -329,6 +391,7 @@ function win() {
   }, WIN_DWELL);
 }
 
+// Every trip starts on your feet with every rock back in place.
 function placeAt(spawn) {
   state.cam = {
     x: spawn.x + (Math.random() - 0.5) * 0.5,
@@ -337,6 +400,9 @@ function placeAt(spawn) {
   };
   state.spawnDist = spawn.dist;
   state.runStartedAt = performance.now();
+  state.upside = false;
+  state.flip = 0;
+  state.taken.clear();
   markVisited();
 }
 
@@ -354,14 +420,25 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   step(dt);
+  state.flip = stepRoll(state.flip, state.upside, dt);
   if (state.maze) {
     const peers = livePeers(now);
-    const labels = renderer.draw(state.maze, state.cam, peers) || [];
+    const ghosts = liveGhosts(state.ghosts, now);
+    const rocks = state.maze.rocks.filter((_, i) => !state.taken.has(i));
+    const power = Math.max(0, state.powerUntil - now);
+    const labels =
+      renderer.draw(state.maze, state.cam, {
+        peers, ghosts, cherries: state.cherries, rocks, roll: rollAngle(state.flip), now, power,
+      }) || [];
     drawTags(labels, state.names, view.clientWidth / renderer.w || 1);
-    drawMinimap(minimap, state.maze, state.cam, { visited, scale: 4, peers });
+    drawMinimap(minimap, state.maze, state.cam, {
+      visited, scale: 4, peers, ghosts, cherries: state.cherries,
+    });
     pushPosition(now);
     elTime.textContent = clock((now - state.startedAt) / 1000);
     elRound.textContent = state.endsAt === null ? "open" : clock((state.endsAt - now) / 1000);
+    elPower.classList.toggle("hidden", power <= 0);
+    if (power > 0) elPowerLeft.textContent = Math.ceil(power / 1000);
   }
   requestAnimationFrame(frame);
 }

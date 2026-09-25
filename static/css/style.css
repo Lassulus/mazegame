@@ -139,6 +139,23 @@ body {
   letter-spacing: 0.12em;
 }
 
+/* Cherry power: the one chip that should grab the eye. */
+.chip.power {
+  border-color: rgba(255, 60, 80, 0.7);
+  color: #ffd0d6;
+  animation: power-pulse 0.9s ease-in-out infinite alternate;
+}
+
+.chip.power b {
+  color: #ff5a6e;
+}
+
+@keyframes power-pulse {
+  to {
+    box-shadow: 0 0 12px rgba(255, 60, 80, 0.55);
+  }
+}
+
 .dot {
   display: inline-block;
   width: 7px;
@@ -218,6 +235,12 @@ kbd {
   background: rgba(8, 20, 40, 0.7);
   color: var(--nix-light);
   text-shadow: 0 0 18px rgba(126, 186, 228, 0.6);
+}
+
+.overlay[data-kind="caught"] {
+  background: rgba(40, 6, 10, 0.72);
+  color: #ff8a96;
+  text-shadow: 0 0 18px rgba(255, 40, 60, 0.6);
 }
 
 .overlay strong {

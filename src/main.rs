@@ -9,7 +9,9 @@ mod conn;
 mod http;
 mod hub;
 mod json;
+mod maze;
 mod net;
+mod pac;
 mod sync;
 mod ws;
 

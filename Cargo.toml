@@ -1,9 +1,9 @@
 [package]
 name = "mazegame"
-version = "2.4.3"
+version = "2.5.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Windows 95 style maze you play in a browser tab, with a spectator camera"
+description = "Windows 95 style maze played as first-person Pac-Man in a browser tab, with a spectator camera"
 license = "MIT"
 
 # No dependencies on purpose: the HTTP layer, the websocket framing and the

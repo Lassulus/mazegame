@@ -232,9 +232,11 @@ impl Server {
                             if x.is_finite() && y.is_finite() && a.is_finite() {
                                 // `c` is the client's clock when it sampled
                                 // the position; older clients leave it out.
+                                // `f` is 1 while walking on the ceiling.
                                 let sent =
                                     json::field(message, "c").and_then(|v| v.parse::<f64>().ok());
-                                self.hub.move_player(pid, x, y, a, sent);
+                                let flipped = json::number(message, "f") == Some(1.0);
+                                self.hub.move_player(pid, x, y, a, flipped, sent);
                             }
                         }
                     }

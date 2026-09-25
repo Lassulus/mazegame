@@ -19,6 +19,13 @@ const EXTRA_LOOPS = 0.06;
 // Spawns must be at least this fraction of the longest walk away from the
 // exit, so scattering players does not also hand out unequal races.
 const SPAWN_BAND = 0.75;
+// The screensaver's grey rocks: touch one and the world turns upside down,
+// touch another and it turns back. Placed from their own PRNG stream so the
+// walls stay byte-identical to the server's copy of this generator.
+const ROCKS = 8;
+const ROCK_SPACING = 8; // tiles, Chebyshev, between two rocks
+export const ROCK_KINDS = 4; // tetrahedron, octahedron, icosahedron, dodecahedron
+export const ROCK_REACH = 0.45; // tiles from a rock's centre that count as touching it
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -181,7 +188,48 @@ export function buildMaze(seed, cells = CELLS) {
     // Standing here means you touched the logo.
     exitApproach: { x: best.tx + 0.5, y: best.ty + 0.5 },
     length: longest,
+    rocks: placeRocks(seed, cells, w, fromExit, spawns),
   };
+}
+
+// Rocks go anywhere between the spawn band and the logo, never on a spawn
+// (you would flip the moment you arrive) and never right at the exit.
+function placeRocks(seed, cells, w, fromExit, spawns) {
+  const rnd = mulberry32((seed ^ 0x0f11_9ed5) >>> 0);
+  const taken = new Set(spawns.map((s) => ((s.y - 0.5) * w + (s.x - 0.5)) | 0));
+  const candidates = [];
+  for (let cy = 0; cy < cells; cy++) {
+    for (let cx = 0; cx < cells; cx++) {
+      const tx = cx * 2 + 1;
+      const ty = cy * 2 + 1;
+      const d = fromExit[ty * w + tx];
+      if (d < 4 || taken.has(ty * w + tx)) continue;
+      candidates.push([tx, ty]);
+    }
+  }
+  const rocks = [];
+  while (candidates.length && rocks.length < ROCKS) {
+    const pick = (rnd() * candidates.length) | 0;
+    const [tx, ty] = candidates[pick];
+    candidates[pick] = candidates[candidates.length - 1];
+    candidates.pop();
+    const crowded = rocks.some(
+      (r) => Math.max(Math.abs(r.x - 0.5 - tx), Math.abs(r.y - 0.5 - ty)) < ROCK_SPACING,
+    );
+    if (crowded) continue;
+    rocks.push({ x: tx + 0.5, y: ty + 0.5, kind: rocks.length % ROCK_KINDS });
+  }
+  return rocks;
+}
+
+/** Index of the rock touched at (x, y), skipping ones already used; -1 if none. */
+export function rockAt(maze, x, y, taken) {
+  for (let i = 0; i < maze.rocks.length; i++) {
+    if (taken.has(i)) continue;
+    const r = maze.rocks[i];
+    if (Math.hypot(r.x - x, r.y - y) < ROCK_REACH) return i;
+  }
+  return -1;
 }
 
 /** Deterministic per-player spawn: same maze, different corner each. */

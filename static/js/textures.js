@@ -221,6 +221,219 @@ function pawnSprite(w = 32, h = 48) {
   return { w, h, shades };
 }
 
+// Sprites below share the pawn's scheme — 0 is transparent, anything else
+// indexes a small palette the renderer fogs per frame — but the index means
+// a colour role rather than a brightness, so one sprite carries a body, eyes
+// and pupils in a single table lookup.
+export const GHOST_BODY = 11; // 1..11: body shading, dark to lit
+export const GHOST_WHITE = 12; // eyes (the pale face when frightened)
+export const GHOST_PUPIL = 13;
+
+// The arcade ghost: a dome, straight sides and a hem of wavy points that
+// swap between two frames as it moves.
+function ghostSprite(scared, frame, w = 32, h = 34) {
+  const shades = new Uint8Array(w * h);
+  const cx = w / 2;
+  const r = w / 2 - 2;
+  const domeY = r + 1;
+  const hem = h - 5;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = x + 0.5 - cx;
+      let inside;
+      if (y + 0.5 < domeY) inside = Math.hypot(dx, y + 0.5 - domeY) <= r;
+      else if (y < hem) inside = Math.abs(dx) <= r;
+      else {
+        // Four points along the hem, shifted half a point on the other frame.
+        const period = (2 * r) / 4;
+        const phase = ((dx + r + (frame ? period / 2 : 0)) % period) / period;
+        const tooth = 1 - Math.abs(phase * 2 - 1); // 0 at a notch, 1 at a point
+        inside = Math.abs(dx) <= r && y - hem < tooth * 5;
+      }
+      if (!inside) continue;
+      const round = Math.sqrt(Math.max(0, 1 - Math.abs(dx) / r));
+      const lit = 0.45 + 0.55 * round - (y / h) * 0.15;
+      shades[y * w + x] = Math.max(1, Math.min(GHOST_BODY, Math.round(lit * GHOST_BODY)));
+    }
+  }
+  const paint = (x0, y0, x1, y1, index) => {
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) shades[y * w + x] = index;
+  };
+  const ellipse = (ex, ey, rx, ry, index) => {
+    for (let y = Math.floor(ey - ry); y <= ey + ry; y++) {
+      for (let x = Math.floor(ex - rx); x <= ex + rx; x++) {
+        if (((x + 0.5 - ex) / rx) ** 2 + ((y + 0.5 - ey) / ry) ** 2 <= 1) shades[y * w + x] = index;
+      }
+    }
+  };
+  if (scared) {
+    // Frightened: two small square eyes and a zigzag mouth.
+    paint(10, 12, 13, 15, GHOST_WHITE);
+    paint(19, 12, 22, 15, GHOST_WHITE);
+    for (let x = 6; x < 26; x++) {
+      const y = 21 + (((x - 6) >> 1) % 2);
+      shades[y * w + x] = GHOST_WHITE;
+    }
+  } else {
+    ellipse(10.5, 13, 4, 5, GHOST_WHITE);
+    ellipse(21.5, 13, 4, 5, GHOST_WHITE);
+    ellipse(10.5, 15, 2.2, 2.2, GHOST_PUPIL);
+    ellipse(21.5, 15, 2.2, 2.2, GHOST_PUPIL);
+  }
+  return { w, h, shades };
+}
+
+export const CHERRY_RED = 7; // 1..7: fruit shading
+export const CHERRY_STEM = 10; // 8..10: stem shading
+export const CHERRY_SHINE = 11;
+
+// Two cherries on forked stems, the arcade bonus fruit.
+function cherrySprite(w = 24, h = 24) {
+  const shades = new Uint8Array(w * h);
+  const stem = (x0, y0, x1, y1) => {
+    const n = Math.ceil(Math.hypot(x1 - x0, y1 - y0) * 2);
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      // A little bow in each stem.
+      const x = x0 + (x1 - x0) * t + Math.sin(t * Math.PI) * 1.5;
+      const y = y0 + (y1 - y0) * t;
+      for (let k = 0; k < 2; k++) {
+        const px = Math.round(x) + k;
+        const py = Math.round(y);
+        if (px >= 0 && px < w && py >= 0 && py < h) shades[py * w + px] = 8 + k + (t < 0.3 ? 1 : 0);
+      }
+    }
+  };
+  stem(6, 14, 16, 2);
+  stem(16, 15, 16, 2);
+  for (let x = 14; x < 21; x++) shades[2 * w + x] = x < 17 ? 10 : 9; // the leaf-ish knot
+  const ball = (bx, by, br) => {
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const d = Math.hypot(x + 0.5 - bx, y + 0.5 - by) / br;
+        if (d > 1) continue;
+        // Lit from the upper left, with a white glint.
+        const lx = (x + 0.5 - (bx - br * 0.4)) / br;
+        const ly = (y + 0.5 - (by - br * 0.4)) / br;
+        if (Math.hypot(lx, ly) < 0.22) {
+          shades[y * w + x] = CHERRY_SHINE;
+          continue;
+        }
+        const lit = 1 - 0.55 * Math.min(1, Math.hypot(lx, ly) / 1.4);
+        shades[y * w + x] = d > 0.88 ? 1 : Math.max(2, Math.round(lit * CHERRY_RED));
+      }
+    }
+  };
+  ball(6.5, 17, 5.8);
+  ball(16.5, 18, 5.8);
+  return { w, h, shades };
+}
+
+export const ROCK_SHADES = 15; // 1..15: grey, dark to lit
+export const ROCK_FRAMES = 48;
+
+// The screensaver's grey Platonic solids, flat-shaded and spinning. Each is
+// a vertex set plus face normals; a face is every vertex that lies furthest
+// along its normal, which spares writing out twenty triangles by hand.
+function solids() {
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const signs = (v) => {
+    let out = [[]];
+    for (const c of v) out = out.flatMap((p) => (c === 0 ? [[...p, 0]] : [[...p, c], [...p, -c]]));
+    return out;
+  };
+  const cyclic = (v) => [v, [v[1], v[2], v[0]], [v[2], v[0], v[1]]].flatMap(signs);
+  const tetra = [[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]];
+  const octa = cyclic([1, 0, 0]);
+  const cube = signs([1, 1, 1]);
+  const icosa = cyclic([0, 1, phi]);
+  // Duals must share an orientation: the icosahedron's face centres are
+  // these dodecahedron vertices, and the other way round.
+  const dodeca = [...cube, ...cyclic([0, phi, 1 / phi])];
+  return [
+    { verts: tetra, normals: tetra.map(([x, y, z]) => [-x, -y, -z]) },
+    { verts: octa, normals: cube },
+    { verts: icosa, normals: dodeca },
+    { verts: dodeca, normals: icosa },
+  ].map(({ verts, normals }) => {
+    const radius = Math.hypot(...verts[0]);
+    const unit = verts.map((v) => v.map((c) => c / radius));
+    const faces = normals.map((n) => {
+      const len = Math.hypot(...n);
+      const dots = unit.map((v) => (v[0] * n[0] + v[1] * n[1] + v[2] * n[2]) / len);
+      const best = Math.max(...dots);
+      return {
+        normal: n.map((c) => c / len),
+        verts: unit.filter((_, i) => dots[i] > best - 1e-6),
+      };
+    });
+    return faces;
+  });
+}
+
+function rockSprites(size = 40) {
+  const light = [-0.45, 0.65, -0.62];
+  const lightLen = Math.hypot(...light);
+  const L = light.map((c) => c / lightLen);
+  const tilt = 0.5;
+  const scale = size * 0.46;
+  return solids().map((faces) => {
+    const frames = [];
+    for (let f = 0; f < ROCK_FRAMES; f++) {
+      const spin = (f / ROCK_FRAMES) * Math.PI * 2;
+      // Spin about the vertical, then tip it towards the viewer so the top
+      // faces catch the light as they come round.
+      const rot = ([x, y, z]) => {
+        const x1 = x * Math.cos(spin) + z * Math.sin(spin);
+        const z1 = -x * Math.sin(spin) + z * Math.cos(spin);
+        const y2 = y * Math.cos(tilt) - z1 * Math.sin(tilt);
+        const z2 = y * Math.sin(tilt) + z1 * Math.cos(tilt);
+        return [x1, y2, z2];
+      };
+      const shades = new Uint8Array(size * size);
+      for (const face of faces) {
+        const n = rot(face.normal);
+        if (n[2] >= 0) continue; // facing away (the viewer looks down +z)
+        const lit = 0.28 + 0.72 * Math.max(0, n[0] * L[0] + n[1] * L[1] + n[2] * L[2]);
+        // Orthographic, y up; vertices sorted round the centroid so any
+        // convex face fills the same way whatever order the set came in.
+        const pts = face.verts.map((v) => {
+          const [x, y] = rot(v);
+          return [size / 2 + x * scale, size / 2 - y * scale];
+        });
+        const mx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+        const my = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+        pts.sort((p, q) => Math.atan2(p[1] - my, p[0] - mx) - Math.atan2(q[1] - my, q[0] - mx));
+        const shade = Math.max(2, Math.min(ROCK_SHADES, Math.round(lit * ROCK_SHADES)));
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const px = x + 0.5;
+            const py = y + 0.5;
+            let edge = Infinity;
+            let inside = true;
+            for (let i = 0; i < pts.length; i++) {
+              const [ax, ay] = pts[i];
+              const [bx, by] = pts[(i + 1) % pts.length];
+              const len = Math.hypot(bx - ax, by - ay) || 1;
+              const d = ((bx - ax) * (py - ay) - (by - ay) * (px - ax)) / len;
+              if (d < 0) {
+                inside = false;
+                break;
+              }
+              edge = Math.min(edge, d);
+            }
+            if (!inside) continue;
+            // A dark seam along every edge keeps the facets readable.
+            shades[y * size + x] = edge < 0.8 ? 1 : shade;
+          }
+        }
+      }
+      frames.push(shades);
+    }
+    return { w: size, h: size, frames };
+  });
+}
+
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -240,5 +453,9 @@ export async function loadTextures() {
     // 128px keeps the snowflake crisp at wall scale; 256 cost 6 MB of LUTs.
     exit: shadeAll(logoTexture(logo, 128), 128, { emissive: true, floor: 0.35 }),
     pawn: pawnSprite(),
+    ghost: [0, 1].map((f) => ghostSprite(false, f)),
+    scared: [0, 1].map((f) => ghostSprite(true, f)),
+    cherry: cherrySprite(),
+    rocks: rockSprites(),
   };
 }

@@ -5,6 +5,18 @@
 //! expires the whole world rolls over to a fresh maze. Only the seed and
 //! positions cross the wire — clients rebuild the geometry themselves.
 //!
+//! The Pac-Man layer: six ghosts and four cherries are simulated here (see
+//! `pac`), on a copy of the maze rebuilt from the same seed. Ghost positions
+//! ride at the end of every snapshot. The text messages around them:
+//!
+//! - `welcome`, `watch` and `world` carry `"cherries":[[tx,ty],…]`, tiles
+//!   whose centre holds a cherry.
+//! - `{"t":"cherries","l":[…]}` to everyone when one is eaten (it reappears
+//!   elsewhere at once), and `{"t":"power","ms":…}` to the eater.
+//! - `{"t":"ate","ghost":id}` to a powered player who ran into a ghost.
+//! - `{"t":"caught"}` to an unpowered one; the client sends itself back to
+//!   its spawn, and the ghosts leave it alone for `SAFE_TIME`.
+//!
 //! The watcher rule: a watcher follows one player; when that player has not
 //! moved for `IDLE_SWITCH`, the watcher is handed to the next player in join
 //! order, preferring one that is currently moving.
@@ -16,6 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::conn::Conn;
 use crate::json;
+use crate::pac::{Hit, Pac, Target};
 use crate::sync::lock;
 use crate::ws::{binary_frame, text_frame};
 
@@ -27,6 +40,16 @@ pub const ROUND_GRACE: Duration = Duration::from_secs(120);
 const ESCAPE_COOLDOWN: Duration = Duration::from_secs(2);
 const MOVE_EPS: f32 = 0.015;
 const TURN_EPS: f32 = 0.015;
+
+/// How long a cherry powers its eater up.
+const POWER_TIME: Duration = Duration::from_secs(8);
+/// Ghosts ignore a player for this long after a catch, an escape or a new
+/// round: the position on file is stale until the client's next report from
+/// its fresh spot, and it must not be caught again for where it used to be.
+const SAFE_TIME: Duration = Duration::from_secs(3);
+/// Longest step the ghosts take in one go. A stalled tick must not let them
+/// leap through a corridor, or through the player they were about to touch.
+const MAX_STEP: Duration = Duration::from_millis(200);
 
 /// Tiles per interest bucket edge while the room is small.
 const BUCKET: f32 = 8.0;
@@ -54,11 +77,21 @@ const KNOWN_CAP: usize = 1024;
 /// Snapshot wire format: a body is twelve bytes rather than forty-odd
 /// characters of JSON with the name repeated every tick. Names travel once
 /// per viewer in a `names` message instead.
+///
+/// Layout, little-endian: head `u8 kind, u8 hz, u16 players, u32 clock`;
+/// `u16 count` bodies of `u32 id, u16 x, u16 y, u16 angle, u8 flags, u8 age`;
+/// then `u8 count` ghosts of `u8 id, u16 x, u16 y`, true at `clock`.
 const PEERS_FRAME: u8 = 1;
 const POS_SCALE: f32 = 1000.0;
 const ANGLE_SCALE: f32 = 65536.0 / std::f32::consts::TAU;
 /// Milliseconds per unit of the age byte, so 0-510 ms fits.
 const AGE_STEP: u64 = 2;
+/// Bits of a body's flags byte.
+const FLAG_FINISHED: u8 = 1;
+/// Walking on the ceiling.
+const FLAG_FLIPPED: u8 = 2;
+/// Holding cherry power: the ghosts run from this one.
+const FLAG_POWERED: u8 = 4;
 
 const ADJECTIVES: [&str; 14] = [
     "lost",
@@ -194,6 +227,13 @@ pub struct Player {
     place: Option<usize>,
     escapes: u32,
     last_escape: Option<Instant>,
+    /// Walking on the ceiling. Purely the client's business; relayed so the
+    /// others draw the pawn upside down.
+    flipped: bool,
+    /// Cherry power runs out at this moment.
+    powered_until: Option<Instant>,
+    /// Ghosts leave this player alone until this moment.
+    safe_until: Option<Instant>,
     /// Names this viewer has already been told about, so a snapshot can be
     /// pure numbers.
     known: Vec<u32>,
@@ -202,6 +242,14 @@ pub struct Player {
 impl Player {
     fn idle_for(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.last_move)
+    }
+
+    fn powered(&self, now: Instant) -> bool {
+        self.powered_until.is_some_and(|until| now < until)
+    }
+
+    fn safe(&self, now: Instant) -> bool {
+        self.safe_until.is_some_and(|until| now < until)
     }
 }
 
@@ -238,6 +286,10 @@ struct State {
     peers_due: Instant,
     snapshot_seq: usize,
     perf: Perf,
+    /// Ghosts and cherries of the current maze.
+    pac: Pac,
+    /// When the ghosts were last stepped.
+    last_step: Instant,
 }
 
 pub struct Hub {
@@ -262,23 +314,28 @@ struct Body {
     pid: u32,
     a: f32,
     finished: bool,
+    flipped: bool,
+    powered: bool,
     age: u8,
 }
 
 impl Hub {
     pub fn new(grace: Duration) -> Self {
         let now = Instant::now();
+        let seed = new_seed();
         Self {
             state: Mutex::new(State {
                 players: Vec::new(),
                 watchers: Vec::new(),
-                seed: new_seed(),
+                seed,
                 round_started: now,
                 deadline: None,
                 finishers: Vec::new(),
                 peers_due: now,
                 snapshot_seq: 0,
                 perf: Perf::default(),
+                pac: Pac::new(seed),
+                last_step: now,
             }),
             ids: AtomicU32::new(1),
             grace,
@@ -317,8 +374,11 @@ impl Hub {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "\"seed\":{},\"ends_in\":{},\"finishers\":[{}]",
-            state.seed, ends_in, finishers
+            "\"seed\":{},\"ends_in\":{},\"finishers\":[{}],\"cherries\":{}",
+            state.seed,
+            ends_in,
+            finishers,
+            state.pac.cherries_json()
         )
     }
 
@@ -342,6 +402,9 @@ impl Hub {
             place: None,
             escapes: 0,
             last_escape: None,
+            flipped: false,
+            powered_until: None,
+            safe_until: None,
             known: Vec::new(),
         };
         // Queued while the lock is still held: the moment the player is in
@@ -390,31 +453,70 @@ impl Hub {
     /// across the internet, the camera's speed varied by 120 % and stalled
     /// for up to 133 ms. The client clock is mapped onto ours through the
     /// least-delayed packet seen, so a late packet keeps the time it was true.
-    pub fn move_player(&self, pid: u32, x: f32, y: f32, a: f32, sent: Option<f64>) -> bool {
+    ///
+    /// Cherries are picked up here rather than on the tick: first come, first
+    /// served is decided by whose report arrives first, not by who happened
+    /// to be earlier in the roster.
+    pub fn move_player(
+        &self,
+        pid: u32,
+        x: f32,
+        y: f32,
+        a: f32,
+        flipped: bool,
+        sent: Option<f64>,
+    ) -> bool {
         let now = Instant::now();
         let here = now.saturating_duration_since(self.started).as_secs_f64() * 1000.0;
-        let mut state = lock(&self.state);
-        let Some(player) = state.players.iter_mut().find(|p| p.pid == pid) else {
-            return false;
-        };
-        let moved = !player.placed
-            || (x - player.x).abs() > MOVE_EPS
-            || (y - player.y).abs() > MOVE_EPS
-            || wrap_angle(a - player.a).abs() > TURN_EPS;
-        player.x = x;
-        player.y = y;
-        player.a = a;
-        player.placed = true;
-        player.moved_at = match sent {
-            Some(sent) => {
-                let lag = player.clock.lag(sent, here);
-                now.checked_sub(Duration::from_secs_f64(lag / 1000.0))
-                    .unwrap_or(now)
+        let (moved, ate) = {
+            let mut state = lock(&self.state);
+            let Some(player) = state.players.iter_mut().find(|p| p.pid == pid) else {
+                return false;
+            };
+            let moved = !player.placed
+                || (x - player.x).abs() > MOVE_EPS
+                || (y - player.y).abs() > MOVE_EPS
+                || wrap_angle(a - player.a).abs() > TURN_EPS;
+            player.x = x;
+            player.y = y;
+            player.a = a;
+            player.flipped = flipped;
+            player.placed = true;
+            player.moved_at = match sent {
+                Some(sent) => {
+                    let lag = player.clock.lag(sent, here);
+                    now.checked_sub(Duration::from_secs_f64(lag / 1000.0))
+                        .unwrap_or(now)
+                }
+                None => now,
+            };
+            if moved {
+                player.last_move = now;
             }
-            None => now,
+            let ate = if state.pac.eat_cherry(x, y) {
+                let player = state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.pid == pid)
+                    .expect("found above, under the same lock");
+                player.powered_until = Some(now + POWER_TIME);
+                let eater = Arc::clone(&player.conn);
+                let everyone: Vec<Arc<Conn>> = Self::audience(&state);
+                let cherries =
+                    format!("{{\"t\":\"cherries\",\"l\":{}}}", state.pac.cherries_json());
+                Some((eater, everyone, cherries))
+            } else {
+                None
+            };
+            (moved, ate)
         };
-        if moved {
-            player.last_move = now;
+        if let Some((eater, everyone, cherries)) = ate {
+            let power = format!("{{\"t\":\"power\",\"ms\":{}}}", POWER_TIME.as_millis());
+            eater.send_urgent(Arc::new(text_frame(&power)));
+            let frame = Arc::new(text_frame(&cherries));
+            for conn in everyone {
+                conn.send_urgent(Arc::clone(&frame));
+            }
         }
         moved
     }
@@ -440,6 +542,9 @@ impl Hub {
                 }
             }
             player.last_escape = Some(now);
+            // The escape card freezes the client for 2.6 s and then drops it
+            // back into the maze; being caught while frozen would be absurd.
+            player.safe_until = Some(now + SAFE_TIME);
             player.escapes += 1;
             let runs = player.escapes;
             let secs = now.saturating_duration_since(round_started).as_secs_f32();
@@ -490,6 +595,8 @@ impl Hub {
             let now = Instant::now();
             let winner = state.finishers.first().map(|f| f.name.clone());
             state.seed = new_seed();
+            state.pac = Pac::new(state.seed);
+            state.last_step = now;
             state.round_started = now;
             state.deadline = None;
             state.finishers.clear();
@@ -500,18 +607,16 @@ impl Hub {
                 player.last_escape = None;
                 player.placed = false;
                 player.last_move = now;
+                player.powered_until = None;
+                player.safe_until = Some(now + SAFE_TIME);
             }
-            match winner {
-                Some(name) => format!(
-                    "{{\"t\":\"world\",\"seed\":{},\"winner\":{}}}",
-                    state.seed,
-                    json::quote(&name)
-                ),
-                None => format!(
-                    "{{\"t\":\"world\",\"seed\":{},\"winner\":null}}",
-                    state.seed
-                ),
-            }
+            let winner = winner.map_or_else(|| "null".to_string(), |name| json::quote(&name));
+            format!(
+                "{{\"t\":\"world\",\"seed\":{},\"winner\":{},\"cherries\":{}}}",
+                state.seed,
+                winner,
+                state.pac.cherries_json()
+            )
         };
         self.broadcast(&frame);
     }
@@ -680,23 +785,26 @@ impl Hub {
 
     fn broadcast(&self, message: &str) {
         let frame = Arc::new(text_frame(message));
-        let conns: Vec<Arc<Conn>> = {
-            let state = lock(&self.state);
-            state
-                .players
-                .iter()
-                .map(|p| Arc::clone(&p.conn))
-                .chain(state.watchers.iter().map(|w| Arc::clone(&w.conn)))
-                .collect()
-        };
+        let conns = Self::audience(&lock(&self.state));
         for conn in conns {
             conn.send_urgent(Arc::clone(&frame));
         }
     }
 
+    /// Every player and watcher, to be written to once the lock is released.
+    fn audience(state: &State) -> Vec<Arc<Conn>> {
+        state
+            .players
+            .iter()
+            .map(|p| Arc::clone(&p.conn))
+            .chain(state.watchers.iter().map(|w| Arc::clone(&w.conn)))
+            .collect()
+    }
+
     // -- the clock ---------------------------------------------------------
 
-    /// Hub thread: rolls the world over, rotates watchers, pushes peers.
+    /// Hub thread: rolls the world over, moves the ghosts, rotates watchers,
+    /// pushes peers.
     pub fn tick(&self) {
         let now = Instant::now();
         let rollover = {
@@ -706,6 +814,7 @@ impl Hub {
         if rollover {
             self.new_round();
         }
+        self.step_ghosts(now);
 
         let due: Vec<(u32, &'static str)> = {
             let state = lock(&self.state);
@@ -751,6 +860,53 @@ impl Hub {
         self.broadcast_peers(now);
     }
 
+    /// Ghosts move by the time actually elapsed, so a late tick does not
+    /// slow them down; touches are told to the players after unlocking.
+    fn step_ghosts(&self, now: Instant) {
+        let told: Vec<(Arc<Conn>, String)> = {
+            let mut state = lock(&self.state);
+            let dt = now
+                .saturating_duration_since(state.last_step)
+                .min(MAX_STEP)
+                .as_secs_f32();
+            state.last_step = now;
+            let targets: Vec<Target> = state
+                .players
+                .iter()
+                .filter(|p| p.placed)
+                .map(|p| Target {
+                    pid: p.pid,
+                    x: p.x,
+                    y: p.y,
+                    powered: p.powered(now),
+                    safe: p.safe(now),
+                })
+                .collect();
+            let hits = state.pac.step(dt, &targets);
+            hits.into_iter()
+                .filter_map(|hit| {
+                    let pid = match hit {
+                        Hit::Ate { pid, .. } | Hit::Caught { pid } => pid,
+                    };
+                    let player = state.players.iter_mut().find(|p| p.pid == pid)?;
+                    let message = match hit {
+                        Hit::Ate { ghost, .. } => {
+                            format!("{{\"t\":\"ate\",\"ghost\":{ghost}}}")
+                        }
+                        Hit::Caught { .. } => {
+                            player.safe_until = Some(now + SAFE_TIME);
+                            "{\"t\":\"caught\"}".to_string()
+                        }
+                    };
+                    Some((Arc::clone(&player.conn), message))
+                })
+                .collect()
+        };
+        for (conn, message) in told {
+            conn.send_urgent(Arc::new(text_frame(&message)));
+        }
+    }
+
     /// Positions, but only the neighbours each client can actually see.
     ///
     /// Sending every position to every player is quadratic: at 560 players
@@ -763,7 +919,7 @@ impl Hub {
     /// `CROWD_BUCKET` cell and the same bytes go to everyone standing in it:
     /// 800 players cost ~160 frames instead of 800.
     fn broadcast_peers(&self, now: Instant) {
-        let (count, interval, seq, bodies, roster, viewers, idle, watching) = {
+        let (count, interval, seq, bodies, roster, viewers, idle, watching, ghosts) = {
             let mut state = lock(&self.state);
             let count = state.players.len();
             if count == 0 && state.watchers.is_empty() {
@@ -789,6 +945,8 @@ impl Hub {
                     pid: p.pid,
                     a: p.a,
                     finished: p.finished_at.is_some(),
+                    flipped: p.flipped,
+                    powered: p.powered(now),
                     age: (now.saturating_duration_since(p.moved_at).as_millis() as u64 / AGE_STEP)
                         .min(255) as u8,
                 })
@@ -820,8 +978,10 @@ impl Hub {
                 .enumerate()
                 .map(|(i, w)| (i, w.target))
                 .collect();
+            // Stepped on this very tick, so they are true at the frame's clock.
+            let ghosts = ghost_section(state.pac.ghosts());
             (
-                count, interval, seq, bodies, roster, viewers, idle, watching,
+                count, interval, seq, bodies, roster, viewers, idle, watching, ghosts,
             )
         };
 
@@ -844,16 +1004,20 @@ impl Hub {
         // body once. Everything below works on indices into `bodies`.
         let mut names: Vec<(Arc<Conn>, Arc<Vec<u8>>)> = Vec::new();
         let mut sends: Vec<(Arc<Conn>, Arc<Vec<u8>>)> = Vec::new();
-        let empty = Arc::new(binary_frame(&[head.as_slice(), &[0, 0]].concat()));
+        let empty = Arc::new(binary_frame(
+            &[head.as_slice(), &[0, 0], ghosts.as_slice()].concat(),
+        ));
 
         let build = |picked: &[usize]| -> Framed {
             let thinned = thin(picked, seq);
-            let mut payload = Vec::with_capacity(head.len() + 2 + thinned.len() * 12);
+            let mut payload =
+                Vec::with_capacity(head.len() + 2 + thinned.len() * 12 + ghosts.len());
             payload.extend_from_slice(&head);
             payload.extend_from_slice(&(thinned.len() as u16).to_le_bytes());
             for &index in &thinned {
                 pack_body(&bodies[index], &mut payload);
             }
+            payload.extend_from_slice(&ghosts);
             (
                 Arc::new(binary_frame(&payload)),
                 thinned.iter().map(|&i| bodies[i].pid).collect(),
@@ -949,7 +1113,7 @@ impl Hub {
         let state = lock(&self.state);
         let dropped: u64 = state.players.iter().map(|p| p.conn.dropped()).sum();
         let mut out = format!(
-            "{{\"version\":{},\"world\":{{{},\"age\":{:.1}}},\"perf\":{{\"build_ms\":{:.1},\"send_ms\":{:.1},\"frames\":{},\"slow\":{},\"players\":{},\"watchers\":{},\"dropped\":{}}}",
+            "{{\"version\":{},\"world\":{{{},\"age\":{:.1}}},\"perf\":{{\"build_ms\":{:.1},\"send_ms\":{:.1},\"frames\":{},\"slow\":{},\"players\":{},\"watchers\":{},\"dropped\":{},\"ghosts\":{},\"cherries\":{}}}",
             json::quote(version),
             Self::world_members(&state, now),
             now.saturating_duration_since(state.round_started)
@@ -961,6 +1125,8 @@ impl Hub {
             state.players.len(),
             state.watchers.len(),
             dropped,
+            state.pac.living(),
+            state.pac.cherries().len(),
         );
         if full {
             let players = state
@@ -1102,8 +1268,28 @@ fn pack_body(body: &Body, out: &mut Vec<u8>) {
     out.extend_from_slice(&quantise(body.y).to_le_bytes());
     let angle = body.a.rem_euclid(std::f32::consts::TAU) * ANGLE_SCALE;
     out.extend_from_slice(&((angle as u32 & 0xFFFF) as u16).to_le_bytes());
-    out.push(u8::from(body.finished));
+    let flags = [
+        (body.finished, FLAG_FINISHED),
+        (body.flipped, FLAG_FLIPPED),
+        (body.powered, FLAG_POWERED),
+    ]
+    .iter()
+    .filter(|(set, _)| *set)
+    .fold(0, |flags, (_, bit)| flags | bit);
+    out.push(flags);
     out.push(body.age);
+}
+
+/// The tail of every snapshot: living ghosts, `u8 id, u16 x, u16 y` each.
+fn ghost_section(ghosts: impl Iterator<Item = (u8, f32, f32)>) -> Vec<u8> {
+    let mut out = vec![0];
+    for (id, x, y) in ghosts {
+        out.push(id);
+        out.extend_from_slice(&quantise(x).to_le_bytes());
+        out.extend_from_slice(&quantise(y).to_le_bytes());
+        out[0] += 1;
+    }
+    out
 }
 
 fn quantise(v: f32) -> u16 {
@@ -1158,6 +1344,8 @@ mod tests {
             pid,
             a: 0.0,
             finished: false,
+            flipped: false,
+            powered: false,
             age: 0,
         }
     }
@@ -1167,7 +1355,7 @@ mod tests {
     #[test]
     fn snapshot_bytes_match_what_the_client_decodes() {
         let mut out = frame_head(10, 801, 0x0102_0304);
-        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
         pack_body(
             &Body {
                 x: 12.345,
@@ -1175,11 +1363,21 @@ mod tests {
                 pid: 0xAABB_CCDD,
                 a: std::f32::consts::PI,
                 finished: true,
+                flipped: false,
+                powered: true,
                 age: 21,
             },
             &mut out,
         );
-        assert_eq!(out.len(), 10 + 12);
+        pack_body(
+            &Body {
+                flipped: true,
+                ..body(7, 1.0, 2.0)
+            },
+            &mut out,
+        );
+        out.extend_from_slice(&ghost_section([(0, 3.5, 4.25), (5, 49.5, 0.0)].into_iter()));
+        assert_eq!(out.len(), 10 + 2 * 12 + 1 + 2 * 5);
         assert_eq!(out[0], PEERS_FRAME);
         assert_eq!(out[1], 10);
         assert_eq!(u16::from_le_bytes([out[2], out[3]]), 801);
@@ -1187,7 +1385,7 @@ mod tests {
             u32::from_le_bytes([out[4], out[5], out[6], out[7]]),
             0x0102_0304
         );
-        assert_eq!(u16::from_le_bytes([out[8], out[9]]), 1);
+        assert_eq!(u16::from_le_bytes([out[8], out[9]]), 2);
         let b = &out[10..];
         assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0xAABB_CCDD);
         assert_eq!(u16::from_le_bytes([b[4], b[5]]), 12345);
@@ -1195,8 +1393,19 @@ mod tests {
         // Half a turn is half the u16 range.
         let angle = u16::from_le_bytes([b[8], b[9]]);
         assert!((32767..=32769).contains(&angle), "{angle}");
-        assert_eq!(b[10], 1);
+        // Finished (bit 0) and powered (bit 2); the second body is flipped.
+        assert_eq!(b[10], 0b101);
         assert_eq!(b[11], 21);
+        assert_eq!(b[12 + 10], 0b010);
+        // Ghosts: a count, then id and position each.
+        let g = &out[10 + 24..];
+        assert_eq!(g[0], 2);
+        assert_eq!(g[1], 0);
+        assert_eq!(u16::from_le_bytes([g[2], g[3]]), 3500);
+        assert_eq!(u16::from_le_bytes([g[4], g[5]]), 4250);
+        assert_eq!(g[6], 5);
+        assert_eq!(u16::from_le_bytes([g[7], g[8]]), 49500);
+        assert_eq!(u16::from_le_bytes([g[9], g[10]]), 0);
     }
 
     /// Positions outside the u16 range must clamp, not wrap to the far side of

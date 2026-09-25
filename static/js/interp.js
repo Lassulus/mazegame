@@ -166,3 +166,35 @@ export function sampleTrack(track, now) {
     a: track.a[i - 1] + (track.a[i] - track.a[i - 1]) * k,
   };
 }
+
+/**
+ * Ghosts ride the same playback as bodies. Every living ghost is in every
+ * snapshot, so one that is missing has been eaten and goes at once; it comes
+ * back as a fresh track when it respawns rather than gliding across the maze.
+ */
+export function syncGhosts(ghosts, list, t, arrived) {
+  const alive = new Set();
+  for (const [id, x, y] of list) {
+    alive.add(id);
+    let ghost = ghosts.get(id);
+    if (!ghost) {
+      ghost = { id, track: makeTrack(x, y, 0), x, y };
+      ghosts.set(id, ghost);
+    }
+    pushSample(ghost.track, x, y, 0, t, arrived);
+  }
+  for (const id of ghosts.keys()) {
+    if (!alive.has(id)) ghosts.delete(id);
+  }
+}
+
+export function liveGhosts(ghosts, now) {
+  const out = [];
+  for (const ghost of ghosts.values()) {
+    const at = sampleTrack(ghost.track, now);
+    ghost.x = at.x;
+    ghost.y = at.y;
+    out.push(ghost);
+  }
+  return out;
+}
