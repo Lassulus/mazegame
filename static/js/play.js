@@ -3,7 +3,8 @@
 // hunt the corridors on the way; a cherry turns the tables for a while, and
 // the screensaver's grey rocks turn the world upside down.
 
-import { WIN_DWELL, buildMaze, rockAt, solid, spawnFor } from "./maze.js";
+import { WIN_DWELL, buildMaze, rockAt, solid, spawnFor, standBack } from "./maze.js";
+import { BITE_MS, addEffect, applyEffects, ghostSpot } from "./effects.js";
 import { Renderer, drawMinimap, retroPixel, rollAngle, stepRoll } from "./render.js";
 import { FINISHED, FLIPPED, POWERED, createSocket } from "./net.js";
 import { createTags } from "./tags.js";
@@ -24,7 +25,8 @@ const WIN_DIST = 0.9;
 // much longer than that and it has genuinely walked out of range, so holding
 // on to it would leave a pawn standing in an empty corridor.
 const PEER_TTL = 8; // snapshots a body may go unmentioned before it is dropped
-const CAUGHT_DWELL = 1400; // ms the "caught" card holds you before the walk home
+// The "caught" card holds you as long as the ghost chews, then you walk home.
+const CAUGHT_DWELL = BITE_MS;
 
 const view = document.getElementById("view");
 const minimap = document.getElementById("minimap");
@@ -67,6 +69,7 @@ const state = {
   upside: false, // walking on the ceiling (toggled by the grey rocks)
   flip: 0, // how far the view has turned over, 0..1
   taken: new Set(), // rocks used up on this trip
+  effects: [], // ghost bites and pops nearby, playing out
   endsAt: null, // performance.now() deadline for the world rollover
   sendHz: SEND_HZ, // position updates per second, paced by the server
   clock: makeClock(), // maps the server's tick clock into local time
@@ -83,6 +86,7 @@ function setMaze(seed) {
   state.respawns = 0;
   state.powerUntil = 0;
   state.ghosts.clear();
+  state.effects.length = 0;
   visited.clear();
   // Own corner of the map, jittered so two players sharing one never stack.
   placeAt(spawnFor(state.maze, state.id));
@@ -155,9 +159,29 @@ function connect(name) {
         note("you ate a ghost");
       } else if (msg.t === "caught") {
         caught();
+      } else if (msg.t === "bite" || msg.t === "pop") {
+        touched(msg);
       }
     },
   });
+}
+
+// A ghost caught someone nearby, or someone ate one. Played at the ghost.
+// When it is us, the camera is moved so the thing is in front of it rather
+// than inside it: pulled back off the ghost that got us and turned to face
+// it, or, for a ghost we ate, the burst is set a step ahead.
+function touched(msg) {
+  let { x, y } = ghostSpot(state.ghosts, msg);
+  if (msg.pid === state.id && state.maze) {
+    const { cam } = state;
+    if (msg.t === "bite") {
+      state.cam = standBack(state.maze, cam.x, cam.y, x, y, 0.9);
+    } else {
+      const [ax, ay] = [cam.x - Math.cos(cam.a), cam.y - Math.sin(cam.a)];
+      ({ x, y } = standBack(state.maze, cam.x, cam.y, ax, ay, 1, { straight: true }));
+    }
+  }
+  addEffect(state.effects, { ...msg, x, y }, performance.now());
 }
 
 function applyWorld(world) {
@@ -426,9 +450,10 @@ function frame(now) {
     const ghosts = liveGhosts(state.ghosts, now);
     const rocks = state.maze.rocks.filter((_, i) => !state.taken.has(i));
     const power = Math.max(0, state.powerUntil - now);
+    const pops = applyEffects(state.effects, now, ghosts, peers);
     const labels =
       renderer.draw(state.maze, state.cam, {
-        peers, ghosts, cherries: state.cherries, rocks, roll: rollAngle(state.flip), now, power,
+        peers, ghosts, cherries: state.cherries, rocks, pops, roll: rollAngle(state.flip), now, power,
       }) || [];
     drawTags(labels, state.names, view.clientWidth / renderer.w || 1);
     drawMinimap(minimap, state.maze, state.cam, {

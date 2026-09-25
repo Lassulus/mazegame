@@ -18,7 +18,8 @@ Two pages:
   stops moving for 2 seconds, the camera cuts to the next player. Made for a
   wall or a projector, it shows nothing but the maze, the name of the player
   being watched and, in one corner, how many are playing, a QR code to this
-  server and a button to join.
+  server (about 384 px, big enough to scan from across a room) and a button
+  to join.
 
 No build step for the client and no dependencies for the server: the server
 is a Rust binary built from the standard library alone (HTTP, the WebSocket
@@ -173,6 +174,15 @@ the logo now meets about 3 ghosts per trip alone (first after ~6 s) and about
   you for 1.4 s and drops you back at this maze's start. The server leaves you
   alone for `SAFE_TIME` (3 s) so the stale position it has on file cannot be
   caught twice; an escape and a new round grant the same grace.
+- **Seeing it happen.** Everyone within 20 tiles of a touch, and any camera
+  riding someone that close, gets a `bite` or a `pop` with the spot
+  (`static/js/effects.js`). A ghost that catches someone stands still for
+  `FEED_SECS` (1.4 s) snapping angry jaws, swelling each time they open,
+  while the victim's pawn sinks into it; the victim's own camera, and a maze
+  cam riding them, is pulled back along the corridor to face it, under a
+  light card so the bite stays visible. An eaten ghost shrinks away blinking
+  and leaves its eyes floating up out of the floor; the eater sees that a
+  step ahead instead of inside the lens.
 - **Cherries.** `CHERRIES` (4) lie in the maze, first come first served. Eat
   one and you have `POWER_TIME` (8 s) of power — the `cherry` chip counts it
   down, every ghost turns blue for you and blinks white for the last two
@@ -440,6 +450,7 @@ static/
     net.js       reconnecting socket; decodes binary snapshots
     interp.js    buffered playback on the server's tick clock, bodies and ghosts
     tags.js      pooled name tags above visible players
+    effects.js   ghost bites and pops nearby, played where they happened
     play.js      input, collision, finish detection, rocks, cherry power,
                  catches, round clock
     watch.js     spectator camera with interpolation, no HUD

@@ -40,6 +40,9 @@ const RESPAWN_CLEARANCE: f32 = 10.0;
 const PICK_TRIES: usize = 32;
 /// Dead ghosts come back after this many seconds.
 const RESPAWN_SECS: f32 = 6.0;
+/// A ghost that catches someone stands over them this long, chewing, so
+/// everyone nearby sees what happened. Matches the victim's "caught" card.
+const FEED_SECS: f32 = 1.4;
 
 /// A player is noticed within this straight-line distance…
 const SIGHT: f32 = 9.0;
@@ -78,7 +81,7 @@ pub enum Hit {
     /// A powered player ran into ghost `ghost`, which is now dead.
     Ate { pid: u32, ghost: u8 },
     /// A ghost caught an unpowered player, who goes back to their spawn.
-    Caught { pid: u32 },
+    Caught { pid: u32, ghost: u8 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -112,6 +115,8 @@ struct Ghost {
     mode: Mode,
     /// Seconds until it comes back; `None` while it is alive.
     dead_for: Option<f32>,
+    /// Seconds left chewing the last catch, standing still; 0 when free.
+    feeding: f32,
 }
 
 impl Ghost {
@@ -255,6 +260,10 @@ impl Pac {
             match self.ghosts[index].dead_for {
                 Some(left) if left - dt > 0.0 => self.ghosts[index].dead_for = Some(left - dt),
                 Some(_) => self.respawn(index, players),
+                // Chewing: stands still over its catch while the chomp plays.
+                None if self.ghosts[index].feeding > 0.0 => {
+                    self.ghosts[index].feeding = (self.ghosts[index].feeding - dt).max(0.0);
+                }
                 None => self.walk(index, dt, players),
             }
         }
@@ -312,6 +321,7 @@ impl Pac {
             dir: None,
             mode: Mode::Wander,
             dead_for: None,
+            feeding: 0.0,
         });
     }
 
@@ -325,6 +335,7 @@ impl Pac {
         ghost.dir = None;
         ghost.mode = Mode::Wander;
         ghost.dead_for = None;
+        ghost.feeding = 0.0;
     }
 
     /// Tile to tile. Time left over after reaching a centre is spent on the
@@ -429,23 +440,31 @@ impl Pac {
     }
 
     /// Touches this step. A player takes at most one hit per step, and ghosts
-    /// ignore anyone marked safe.
+    /// ignore anyone marked safe. A ghost still chewing its last catch bites
+    /// no one else, but can itself be eaten.
     fn contacts(&mut self, players: &[Target]) -> Vec<Hit> {
         let mut hits = Vec::new();
         for player in players.iter().filter(|p| !p.safe) {
             let touched = self.ghosts.iter_mut().find(|g| {
                 let (gx, gy) = g.position();
-                g.dead_for.is_none() && (gx - player.x).hypot(gy - player.y) <= TOUCH
+                g.dead_for.is_none()
+                    && (player.powered || g.feeding <= 0.0)
+                    && (gx - player.x).hypot(gy - player.y) <= TOUCH
             });
             let Some(ghost) = touched else { continue };
             if player.powered {
                 ghost.dead_for = Some(RESPAWN_SECS);
+                ghost.feeding = 0.0;
                 hits.push(Hit::Ate {
                     pid: player.pid,
                     ghost: ghost.id,
                 });
             } else {
-                hits.push(Hit::Caught { pid: player.pid });
+                ghost.feeding = FEED_SECS;
+                hits.push(Hit::Caught {
+                    pid: player.pid,
+                    ghost: ghost.id,
+                });
             }
         }
         hits
@@ -601,7 +620,7 @@ mod tests {
         loop {
             let hits = pac.step(DT, &[target]);
             elapsed += DT;
-            if hits == [Hit::Caught { pid: 1 }] {
+            if matches!(hits[..], [Hit::Caught { pid: 1, .. }]) {
                 break;
             }
             let now = walk(&pac.ghosts[0]);
@@ -647,8 +666,31 @@ mod tests {
         victim.safe = true;
         assert!(pac.step(0.0, &[victim]).is_empty());
         victim.safe = false;
-        assert_eq!(pac.step(0.0, &[victim]), [Hit::Caught { pid: 3 }]);
+        assert_eq!(pac.step(0.0, &[victim]), [Hit::Caught { pid: 3, ghost: 0 }]);
         assert_eq!(pac.living(), GHOSTS_BASE);
+    }
+
+    /// A ghost that catches someone stands over them chewing for
+    /// `FEED_SECS`, bites nobody else meanwhile but can itself be eaten, and
+    /// then goes back to hunting.
+    #[test]
+    fn a_catch_holds_the_ghost_in_place_while_it_chews() {
+        let mut pac = lone_ghost(9);
+        let spot = pac.ghosts[0].position();
+        let victim = player(3, spot, false);
+        assert_eq!(pac.step(0.0, &[victim]), [Hit::Caught { pid: 3, ghost: 0 }]);
+        let bystander = player(4, spot, false);
+        for _ in 0..(FEED_SECS / DT) as usize - 2 {
+            assert!(pac.step(DT, &[bystander]).is_empty(), "bit while chewing");
+            assert_eq!(pac.ghosts[0].position(), spot, "moved while chewing");
+        }
+        let caught =
+            (0..4).any(|_| pac.step(DT, &[bystander]) == [Hit::Caught { pid: 4, ghost: 0 }]);
+        assert!(caught, "never bit again after chewing");
+
+        let eater = player(5, pac.ghosts[0].position(), true);
+        assert!(pac.ghosts[0].feeding > 0.0);
+        assert_eq!(pac.step(0.0, &[eater]), [Hit::Ate { pid: 5, ghost: 0 }]);
     }
 
     /// The pack grows with the room, one ghost a step, up to the cap; new

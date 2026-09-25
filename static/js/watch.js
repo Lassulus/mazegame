@@ -3,7 +3,8 @@
 // meant for a wall or a projector, so it carries no HUD: just the maze, and a
 // corner inviting whoever is looking at it to join.
 
-import { buildMaze, rockAt } from "./maze.js";
+import { buildMaze, rockAt, standBack } from "./maze.js";
+import { BITE_MS, addEffect, applyEffects, ghostSpot } from "./effects.js";
 import { Renderer, retroPixel, rollAngle, stepRoll } from "./render.js";
 import {
   clockTime, liveGhosts, makeClock, makeTrack, pushSample, sampleTrack, syncGhosts,
@@ -36,6 +37,10 @@ const state = {
   peers: new Map(),
   ghosts: new Map(),
   cherries: [],
+  effects: [], // ghost bites and pops nearby, playing out
+  // While the watched player is being eaten, the camera stands back from
+  // the ghost that got them: { x, y, until }.
+  backOff: null,
   clock: makeClock(), // maps the server's tick clock into local time
 };
 window.mazecam = state; // handy for the console and for smoke tests
@@ -70,6 +75,8 @@ const socket = createSocket("/ws/watch", {
       state.taken.clear();
       state.peers.clear();
       state.ghosts.clear();
+      state.effects.length = 0;
+      state.backOff = null;
       setCherries(msg.cherries);
       document.title = `watching ${msg.name} · NixOS Maze`;
       elTarget.textContent = msg.name;
@@ -87,6 +94,8 @@ const socket = createSocket("/ws/watch", {
       setCherries(msg.cherries);
     } else if (msg.t === "cherries") {
       setCherries(msg.l);
+    } else if (msg.t === "bite" || msg.t === "pop") {
+      touched(msg);
     } else if (msg.t === "idle_pool") {
       state.target = null;
       state.maze = null;
@@ -98,6 +107,23 @@ const socket = createSocket("/ws/watch", {
     }
   },
 });
+
+// Same as the player's page: a touch on the watched player is moved in front
+// of the camera instead of inside it.
+function touched(msg) {
+  const now = performance.now();
+  let { x, y } = ghostSpot(state.ghosts, msg);
+  if (state.target && msg.pid === state.target.id && state.maze) {
+    const { cam } = state;
+    if (msg.t === "bite") {
+      state.backOff = { x, y, until: now + BITE_MS };
+    } else {
+      const [ax, ay] = [cam.x - Math.cos(cam.a), cam.y - Math.sin(cam.a)];
+      ({ x, y } = standBack(state.maze, cam.x, cam.y, ax, ay, 1, { straight: true }));
+    }
+  }
+  addEffect(state.effects, { ...msg, x, y }, now);
+}
 
 // The camera rides the watched player; everyone else is drawn as a pawn. Both
 // are interpolated, so a 10 Hz feed still plays back as smooth motion.
@@ -159,7 +185,8 @@ addEventListener("orientationchange", () => setTimeout(() => renderer.resize(), 
 addEventListener("resize", () => renderer.resize());
 
 // The code points at this very server, so it is right on any deployment.
-drawQr(document.getElementById("qr"), new URL("/", location.href).href);
+// Three times the default: it has to scan from across a room.
+drawQr(document.getElementById("qr"), new URL("/", location.href).href, { size: 384 });
 
 let last = performance.now();
 function frame(now) {
@@ -169,6 +196,10 @@ function frame(now) {
     const prev = state.cam;
     state.cam = sampleTrack(state.camTrack, now);
     if (Math.hypot(state.cam.x - prev.x, state.cam.y - prev.y) > TELEPORT) state.taken.clear();
+    const { backOff } = state;
+    if (backOff && now < backOff.until) {
+      state.cam = standBack(state.maze, state.cam.x, state.cam.y, backOff.x, backOff.y, 0.9);
+    }
     // The player's own client decides when a rock turns them over; the
     // camera only sees the result in the flags. Rocks it rides through are
     // gone, as they are for the player.
@@ -176,9 +207,12 @@ function frame(now) {
     if (rock >= 0) state.taken.add(rock);
     state.flip = stepRoll(state.flip, !!(state.targetFlags & FLIPPED), dt);
     // No minimap and no name tags: a spectator should be as lost as the player.
+    const peers = livePeers(now);
+    const ghosts = liveGhosts(state.ghosts, now);
     renderer.draw(state.maze, state.cam, {
-      peers: livePeers(now),
-      ghosts: liveGhosts(state.ghosts, now),
+      peers,
+      ghosts,
+      pops: applyEffects(state.effects, now, ghosts, peers),
       cherries: state.cherries,
       rocks: state.maze.rocks.filter((_, i) => !state.taken.has(i)),
       roll: rollAngle(state.flip),

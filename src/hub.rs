@@ -18,6 +18,10 @@
 //! - `{"t":"ate","ghost":id}` to a powered player who ran into a ghost.
 //! - `{"t":"caught"}` to an unpowered one; the client sends itself back to
 //!   its spawn, and the ghosts leave it alone for `SAFE_TIME`.
+//! - `{"t":"bite"|"pop","ghost":id,"pid":p,"x":…,"y":…}` to everyone within
+//!   `SIGHT` of a catch or a ghost being eaten, and to cameras riding someone
+//!   that close, so they can play it where it happened. The catching ghost
+//!   stands still chewing while the victim's card is up.
 //!
 //! The watcher rule: a watcher follows one player; when that player has not
 //! moved for `IDLE_SWITCH`, the watcher is handed to the next player in join
@@ -864,6 +868,12 @@ impl Hub {
 
     /// Ghosts move by the time actually elapsed, so a late tick does not
     /// slow them down; touches are told to the players after unlocking.
+    ///
+    /// Besides the private `caught` / `ate` for the player involved, everyone
+    /// within `SIGHT` of the touch (and every camera riding someone that
+    /// close) hears a `bite` or a `pop` with the spot, so their client can
+    /// play the chomp or the burst where it happened instead of a ghost or a
+    /// player silently vanishing.
     fn step_ghosts(&self, now: Instant) {
         let told: Vec<(Arc<Conn>, String)> = {
             let mut state = lock(&self.state);
@@ -885,24 +895,40 @@ impl Hub {
                 })
                 .collect();
             let hits = state.pac.step(dt, &targets);
-            hits.into_iter()
-                .filter_map(|hit| {
-                    let pid = match hit {
-                        Hit::Ate { pid, .. } | Hit::Caught { pid } => pid,
-                    };
-                    let player = state.players.iter_mut().find(|p| p.pid == pid)?;
-                    let message = match hit {
-                        Hit::Ate { ghost, .. } => {
-                            format!("{{\"t\":\"ate\",\"ghost\":{ghost}}}")
-                        }
-                        Hit::Caught { .. } => {
-                            player.safe_until = Some(now + SAFE_TIME);
-                            "{\"t\":\"caught\"}".to_string()
-                        }
-                    };
-                    Some((Arc::clone(&player.conn), message))
-                })
-                .collect()
+            let mut told = Vec::new();
+            for hit in hits {
+                let (pid, ghost) = match hit {
+                    Hit::Ate { pid, ghost } | Hit::Caught { pid, ghost } => (pid, ghost),
+                };
+                let Some(player) = state.players.iter_mut().find(|p| p.pid == pid) else {
+                    continue;
+                };
+                let (x, y) = (player.x, player.y);
+                let (private, kind) = match hit {
+                    Hit::Ate { .. } => (format!("{{\"t\":\"ate\",\"ghost\":{ghost}}}"), "pop"),
+                    Hit::Caught { .. } => {
+                        player.safe_until = Some(now + SAFE_TIME);
+                        ("{\"t\":\"caught\"}".to_string(), "bite")
+                    }
+                };
+                told.push((Arc::clone(&player.conn), private));
+                let public = format!(
+                    "{{\"t\":\"{kind}\",\"ghost\":{ghost},\"pid\":{pid},\"x\":{x:.3},\"y\":{y:.3}}}"
+                );
+                let near = |px: f32, py: f32| (px - x).hypot(py - y) <= SIGHT;
+                for p in state.players.iter().filter(|p| p.placed && near(p.x, p.y)) {
+                    told.push((Arc::clone(&p.conn), public.clone()));
+                }
+                for w in &state.watchers {
+                    let riding = w
+                        .target
+                        .and_then(|t| state.players.iter().find(|p| p.pid == t));
+                    if riding.is_some_and(|p| near(p.x, p.y)) {
+                        told.push((Arc::clone(&w.conn), public.clone()));
+                    }
+                }
+            }
+            told
         };
         for (conn, message) in told {
             conn.send_urgent(Arc::new(text_frame(&message)));

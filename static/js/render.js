@@ -3,7 +3,7 @@
 
 import { EMPTY, EXIT, tileAt } from "./maze.js";
 import {
-  CHERRY_RED, CHERRY_SHINE, CHERRY_STEM, GHOST_BODY, GHOST_PUPIL, GHOST_WHITE,
+  CHERRY_RED, CHERRY_SHINE, CHERRY_STEM, GHOST_BODY, GHOST_MOUTH, GHOST_PUPIL, GHOST_WHITE,
   LEVELS, PAWN_SHADES, ROCK_FRAMES, ROCK_SHADES, loadTextures,
 } from "./textures.js";
 
@@ -24,6 +24,14 @@ const CHERRY_SIZE = 0.26;
 const ROCK_SIZE = 0.34;
 const ROCK_SPIN = 0.6; // turns per second
 const FLASH_MS = 2000; // frightened ghosts blink white for the last of the power
+// A ghost that has caught someone snaps its jaws this often, and swells by
+// this much each time they open.
+const CHOMP_MS = 120;
+const CHOMP_SWELL = 0.22;
+// An eaten ghost: for the first part of its pop it shrinks away blinking,
+// then its eyes float up out of the floor and fade.
+const POP_SHRINK = 0.3;
+const EYES_RISE = 0.55; // world units, about to the top of a close view
 
 // Blinky, Pinky, Inky, Clyde, and two more for a maze this size.
 export const GHOST_COLORS = [
@@ -34,6 +42,7 @@ const SPRITE_PAWN = 0;
 const SPRITE_GHOST = 1;
 const SPRITE_CHERRY = 2;
 const SPRITE_ROCK = 3;
+const SPRITE_POP = 4;
 
 // Stable per-player hue: golden-angle spacing keeps neighbours distinct.
 export function playerColor(id) {
@@ -68,10 +77,11 @@ function shadeRange(palette, from, to, [r, g, b], low) {
   }
   return palette;
 }
-function ghostPalette(body, face, pupil) {
+function ghostPalette(body, face, pupil, mouth = [70, 0, 16]) {
   const palette = shadeRange(new Array(PAWN_SHADES).fill(null), 1, GHOST_BODY, body, 0.3);
   palette[GHOST_WHITE] = face;
   palette[GHOST_PUPIL] = pupil;
+  palette[GHOST_MOUTH] = mouth;
   return palette;
 }
 const GHOST_PALETTES = GHOST_COLORS.map((c) => ghostPalette(c, [236, 236, 255], [30, 48, 210]));
@@ -147,10 +157,12 @@ export class Renderer {
   }
 
   /**
-   * `scene`: `peers` (other players), `ghosts` ({id, x, y}), `cherries` and
-   * `rocks` ({x, y, kind}), `roll` (radians the view is turned about its own
-   * axis; pi is upside down), `now` (ms, drives animation) and `power` (ms of
-   * cherry power the viewer has left; ghosts look frightened while it lasts).
+   * `scene`: `peers` (other players; `gulp` 0..1 while a ghost swallows
+   * one), `ghosts` ({id, x, y, chomp}), `pops` (eaten ghosts, {id, x, y, t}
+   * with t 0..1), `cherries` and `rocks` ({x, y, kind}), `roll` (radians the
+   * view is turned about its own axis; pi is upside down), `now` (ms, drives
+   * animation) and `power` (ms of cherry power the viewer has left; ghosts
+   * look frightened while it lasts).
    */
   draw(maze, cam, scene = {}) {
     if (!this.tex || !this.w) return [];
@@ -330,8 +342,12 @@ export class Renderer {
   // of the pawns so the page can hang name tags on them.
   #drawSprites(cam, scene, dirX, dirY, planeX, planeY, lineScale, half) {
     const labels = [];
-    const { peers = [], ghosts = [], cherries = [], rocks = [], now = 0, power = 0 } = scene;
-    if (!peers.length && !ghosts.length && !cherries.length && !rocks.length) return labels;
+    const {
+      peers = [], ghosts = [], cherries = [], rocks = [], pops = [], now = 0, power = 0,
+    } = scene;
+    if (!peers.length && !ghosts.length && !cherries.length && !rocks.length && !pops.length) {
+      return labels;
+    }
     const { w, h, px, tex } = this;
     const invDet = 1 / (planeX * dirY - dirX * planeY);
 
@@ -358,16 +374,38 @@ export class Renderer {
     };
 
     for (const p of peers) {
+      // A player being eaten sinks into the ghost's mouth over the chomp.
+      const size = PAWN_HEIGHT * (1 - Math.min(1, p.gulp || 0));
       // Someone walking on the ceiling hangs from it, head down.
-      const lift = p.flipped ? -0.5 + PAWN_HEIGHT : 0.5;
-      add(SPRITE_PAWN, p, p.x, p.y, tex.pawn, tex.pawn.shades, PAWN_HEIGHT, lift, !!p.flipped);
+      const lift = p.flipped ? -0.5 + size : 0.5;
+      add(SPRITE_PAWN, p, p.x, p.y, tex.pawn, tex.pawn.shades, size, lift, !!p.flipped);
     }
     const scared = power > 0;
     const sheet = scared ? tex.scared : tex.ghost;
     const hem = (now / GHOST_STEP_MS) | 0;
+    const jaw = ((now / CHOMP_MS) | 0) & 1; // 0 open, 1 shut
     for (const g of ghosts) {
+      if (g.chomp) {
+        // Biting someone: snapping jaws, swelling each time they open, in
+        // its own colours whatever the viewer's power says.
+        const sprite = tex.chomp[jaw];
+        const size = GHOST_HEIGHT * (jaw === 0 ? 1 + CHOMP_SWELL : 1);
+        add(SPRITE_GHOST, g, g.x, g.y, sprite, sprite.shades, size, 0.5 - GHOST_HOVER, false);
+        continue;
+      }
       const sprite = sheet[(hem + g.id) & 1];
       add(SPRITE_GHOST, g, g.x, g.y, sprite, sprite.shades, GHOST_HEIGHT, 0.5 - GHOST_HOVER, false);
+    }
+    for (const pop of pops) {
+      if (pop.t < POP_SHRINK) {
+        const sprite = tex.scared[jaw];
+        const size = GHOST_HEIGHT * (1 - pop.t / POP_SHRINK);
+        add(SPRITE_POP, pop, pop.x, pop.y, sprite, sprite.shades, size, 0.5 - GHOST_HOVER, false);
+      } else {
+        const rise = ((pop.t - POP_SHRINK) / (1 - POP_SHRINK)) * EYES_RISE;
+        const sprite = tex.eyes;
+        add(SPRITE_POP, pop, pop.x, pop.y, sprite, sprite.shades, GHOST_HEIGHT, 0.5 - GHOST_HOVER - rise, false);
+      }
     }
     for (const c of cherries) {
       const bob = 0.03 * (1 + Math.sin(now / 260 + c.x * 3.1 + c.y));
@@ -409,10 +447,21 @@ export class Renderer {
         const [cr, cg, cb] = item.finished ? FINISHED_COLOR : playerColor(item.id);
         ramp = colorRamp(cr, cg, cb, Math.max(0.42, fade));
       } else if (kind === SPRITE_GHOST) {
-        const palette = scared
-          ? flash ? FLASH_PALETTE : SCARED_PALETTE
-          : GHOST_PALETTES[item.id % GHOST_PALETTES.length];
+        const palette = item.chomp
+          ? GHOST_PALETTES[item.id % GHOST_PALETTES.length]
+          : scared
+            ? flash ? FLASH_PALETTE : SCARED_PALETTE
+            : GHOST_PALETTES[item.id % GHOST_PALETTES.length];
         ramp = paletteRamp(palette, Math.max(0.55, fade));
+      } else if (kind === SPRITE_POP) {
+        if (item.t < POP_SHRINK) {
+          // Shrinking away, blinking white and blue.
+          ramp = paletteRamp(jaw ? FLASH_PALETTE : SCARED_PALETTE, Math.max(0.55, fade));
+        } else {
+          // The eyes fade as they rise.
+          const left = 1 - (item.t - POP_SHRINK) / (1 - POP_SHRINK);
+          ramp = paletteRamp(GHOST_PALETTES[item.id % GHOST_PALETTES.length], Math.max(0.55, fade) * left);
+        }
       } else if (kind === SPRITE_CHERRY) {
         ramp = paletteRamp(CHERRY_PALETTE, Math.max(0.45, fade));
       } else {

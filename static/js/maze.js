@@ -232,6 +232,43 @@ export function rockAt(maze, x, y, taken) {
   return -1;
 }
 
+/**
+ * Step back from (fromX, fromY) through (x, y) by up to `dist`, stopping short
+ * of walls, and face it. Used to pull a camera off a ghost that has just
+ * caught its player, so the chomp is in view instead of inside the lens.
+ * Straight back is often straight into a wall — the ghost came at you from
+ * the side of a corridor — so unless `straight` is set, the four corridor
+ * directions are tried too and whichever ends furthest from (fromX, fromY)
+ * wins.
+ */
+export function standBack(maze, x, y, fromX, fromY, dist, { straight = false, radius = 0.2 } = {}) {
+  const clear = (px, py) =>
+    !solid(maze, px - radius, py - radius) && !solid(maze, px + radius, py - radius) &&
+    !solid(maze, px - radius, py + radius) && !solid(maze, px + radius, py + radius);
+  const walk = (dx, dy) => {
+    let bx = x;
+    let by = y;
+    for (let s = 0.05; s <= dist; s += 0.05) {
+      const nx = x + dx * s;
+      const ny = y + dy * s;
+      if (!clear(nx, ny)) break;
+      bx = nx;
+      by = ny;
+    }
+    return [bx, by];
+  };
+  const len = Math.hypot(x - fromX, y - fromY);
+  const away = len < 1e-3 ? [1, 0] : [(x - fromX) / len, (y - fromY) / len];
+  const tries = straight ? [away] : [away, [1, 0], [-1, 0], [0, 1], [0, -1]];
+  let best = null;
+  for (const [dx, dy] of tries) {
+    const [bx, by] = walk(dx, dy);
+    const reach = Math.hypot(bx - fromX, by - fromY);
+    if (!best || reach > best.reach + 0.05) best = { x: bx, y: by, reach };
+  }
+  return { x: best.x, y: best.y, a: Math.atan2(fromY - best.y, fromX - best.x) };
+}
+
 /** Deterministic per-player spawn: same maze, different corner each. */
 export function spawnFor(maze, id) {
   const rnd = mulberry32((maze.seed ^ Math.imul(id || 1, 0x9e3779b1)) >>> 0);

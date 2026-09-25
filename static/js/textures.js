@@ -226,12 +226,15 @@ function pawnSprite(w = 32, h = 48) {
 // a colour role rather than a brightness, so one sprite carries a body, eyes
 // and pupils in a single table lookup.
 export const GHOST_BODY = 11; // 1..11: body shading, dark to lit
-export const GHOST_WHITE = 12; // eyes (the pale face when frightened)
+export const GHOST_WHITE = 12; // eyes and teeth (the pale face when frightened)
 export const GHOST_PUPIL = 13;
+export const GHOST_MOUTH = 14; // the inside of a biting mouth
 
 // The arcade ghost: a dome, straight sides and a hem of wavy points that
-// swap between two frames as it moves.
-function ghostSprite(scared, frame, w = 32, h = 34) {
+// swap between two frames as it moves. `face` is "normal", "scared",
+// "chomp" (biting someone: jaws open on frame 0, shut on frame 1) or "eyes"
+// (what is left floating once a ghost has been eaten).
+function ghostSprite(face, frame, w = 32, h = 34) {
   const shades = new Uint8Array(w * h);
   const cx = w / 2;
   const r = w / 2 - 2;
@@ -266,7 +269,7 @@ function ghostSprite(scared, frame, w = 32, h = 34) {
       }
     }
   };
-  if (scared) {
+  if (face === "scared") {
     // Frightened: two small square eyes and a zigzag mouth.
     paint(10, 12, 13, 15, GHOST_WHITE);
     paint(19, 12, 22, 15, GHOST_WHITE);
@@ -274,11 +277,36 @@ function ghostSprite(scared, frame, w = 32, h = 34) {
       const y = 21 + (((x - 6) >> 1) % 2);
       shades[y * w + x] = GHOST_WHITE;
     }
-  } else {
-    ellipse(10.5, 13, 4, 5, GHOST_WHITE);
-    ellipse(21.5, 13, 4, 5, GHOST_WHITE);
-    ellipse(10.5, 15, 2.2, 2.2, GHOST_PUPIL);
-    ellipse(21.5, 15, 2.2, 2.2, GHOST_PUPIL);
+    return { w, h, shades };
+  }
+  ellipse(10.5, 13, 4, 5, GHOST_WHITE);
+  ellipse(21.5, 13, 4, 5, GHOST_WHITE);
+  ellipse(10.5, 15, 2.2, 2.2, GHOST_PUPIL);
+  ellipse(21.5, 15, 2.2, 2.2, GHOST_PUPIL);
+  if (face === "chomp") {
+    // Angry brows cut into the top of each eye, sloping to the middle.
+    for (let i = 0; i < 5; i++) {
+      paint(6 + i, 7 + (i >> 1), 7 + i, 10 + (i >> 1), 6);
+      paint(25 - i, 7 + (i >> 1), 26 - i, 10 + (i >> 1), 6);
+    }
+    if (frame === 0) {
+      // Jaws wide open: a dark maw with a row of teeth top and bottom.
+      paint(6, 19, 26, 28, GHOST_MOUTH);
+      for (let x = 6; x < 26; x++) {
+        const tooth = 2 - Math.abs(((x - 6) % 4) - 1.5) + 0.5;
+        paint(x, 19, x + 1, 19 + Math.max(0, Math.round(tooth)), GHOST_WHITE);
+        paint(x, 28 - Math.max(0, Math.round(tooth)), x + 1, 28, GHOST_WHITE);
+      }
+    } else {
+      // Jaws shut: teeth meeting along a zigzag.
+      paint(6, 22, 26, 25, GHOST_MOUTH);
+      for (let x = 6; x < 26; x++) {
+        const y = 22 + (((x - 6) >> 1) % 2);
+        paint(x, y, x + 1, y + 2, GHOST_WHITE);
+      }
+    }
+  } else if (face === "eyes") {
+    for (let i = 0; i < shades.length; i++) if (shades[i] <= GHOST_BODY) shades[i] = 0;
   }
   return { w, h, shades };
 }
@@ -453,8 +481,10 @@ export async function loadTextures() {
     // 128px keeps the snowflake crisp at wall scale; 256 cost 6 MB of LUTs.
     exit: shadeAll(logoTexture(logo, 128), 128, { emissive: true, floor: 0.35 }),
     pawn: pawnSprite(),
-    ghost: [0, 1].map((f) => ghostSprite(false, f)),
-    scared: [0, 1].map((f) => ghostSprite(true, f)),
+    ghost: [0, 1].map((f) => ghostSprite("normal", f)),
+    scared: [0, 1].map((f) => ghostSprite("scared", f)),
+    chomp: [0, 1].map((f) => ghostSprite("chomp", f)),
+    eyes: ghostSprite("eyes", 0),
     cherry: cherrySprite(),
     rocks: rockSprites(),
   };
