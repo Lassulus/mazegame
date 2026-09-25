@@ -146,11 +146,21 @@ world, so use it for screenshots rather than racing.
 
 ## Ghosts, cherries and the ceiling
 
-The ghosts are shared: one set of `GHOSTS` (6) for the whole world, run by the
-server (`src/pac.rs`) so everyone sees the same ghost in the same corridor and
+The ghosts are shared: one pack for the whole world, run by the server
+(`src/pac.rs`) so everyone sees the same ghost in the same corridor and
 eating one removes it for everybody. To do that the server needs the walls,
 so `src/maze.rs` is a byte-for-byte port of `maze.js`; a test pins grid
 checksums and exits for a handful of seeds against the JavaScript.
+
+The pack grows with the room: `GHOSTS_BASE` (10), plus one per three
+players, up to `GHOSTS_MAX` (32), one ghost added per tick well away from
+everybody. When players leave, surplus ghosts retire once there are more
+than two too many — dead ones first, then the loneliest wanderer — so the
+pack does not flicker as people come and go. The first version had a fixed
+six, and with thirty people playing nobody met one: the room split them and
+whole regions of the maze went unhaunted. In simulation a runner heading for
+the logo now meets about 3 ghosts per trip alone (first after ~6 s) and about
+7 among thirty players (first after ~3 s), where six ghosts managed 2.
 
 - **Ghosts** start in the middle band of the maze (20-65 % of the longest walk
   from the logo, short of the spawn band) and move tile to tile like the

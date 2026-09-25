@@ -1,15 +1,32 @@
 //! Ghosts and cherries: the Pac-Man half of the maze.
 //!
-//! Ghosts are shared, so they live here and not in the clients: six of them
-//! walk the corridors tile by tile, chase whoever strays close and scatter
-//! from anyone holding a cherry. Everything is stepped with an explicit `dt`
-//! and drawn from a PRNG seeded by the maze seed — no clocks inside — so the
-//! whole thing can be driven second by second from a test.
+//! Ghosts are shared, so they live here and not in the clients: a pack that
+//! grows with the room walks the corridors tile by tile, chases whoever
+//! strays close and scatters from anyone holding a cherry. Everything is
+//! stepped with an explicit `dt` and drawn from a PRNG seeded by the maze
+//! seed — no clocks inside — so the whole thing can be driven second by
+//! second from a test.
 
 use crate::maze::{DIRS, EMPTY, Maze, Mulberry32};
 
-pub const GHOSTS: u8 = 6;
+/// Ghosts in an empty or quiet world. Six was too few to ever meet one: a
+/// room of thirty players split them between itself and whole stretches of
+/// maze went unhaunted. Ten meets a lone runner about three times on the way
+/// to the logo.
+pub const GHOSTS_BASE: usize = 10;
+/// One more ghost for every this many players…
+const PLAYERS_PER_GHOST: usize = 3;
+/// …up to this many. Every living ghost rides every snapshot at five bytes.
+pub const GHOSTS_MAX: usize = 32;
+/// Surplus ghosts are only retired past this margin, so players coming and
+/// going do not make the pack flicker.
+const RETIRE_SLACK: usize = 2;
 pub const CHERRIES: usize = 4;
+
+/// How many ghosts a room of `players` gets.
+pub fn pack_size(players: usize) -> usize {
+    (GHOSTS_BASE + players / PLAYERS_PER_GHOST).min(GHOSTS_MAX)
+}
 
 /// Ghosts start and respawn in the middle band of the maze: far enough from
 /// the logo that the finish is not a gauntlet, and short of the spawn band so
@@ -113,6 +130,8 @@ pub struct Pac {
     ghost_cells: Vec<(i32, i32)>,
     /// Cells a cherry may appear on.
     cherry_cells: Vec<(i32, i32)>,
+    /// Ceiling on the pack whatever the room; tests pin it to watch one ghost.
+    pack_cap: usize,
 }
 
 impl Pac {
@@ -137,19 +156,10 @@ impl Pac {
             cherries: Vec::new(),
             ghost_cells,
             cherry_cells,
+            pack_cap: GHOSTS_MAX,
         };
-        for id in 0..GHOSTS {
-            let others: Vec<(f32, f32)> = pac.ghosts.iter().map(Ghost::position).collect();
-            let cell = pac.pick_far(&others, GHOST_SPACING);
-            pac.ghosts.push(Ghost {
-                id,
-                from: cell,
-                to: cell,
-                progress: 0.0,
-                dir: None,
-                mode: Mode::Wander,
-                dead_for: None,
-            });
+        for _ in 0..GHOSTS_BASE {
+            pac.add_ghost(GHOST_SPACING, &[]);
         }
         for _ in 0..CHERRIES {
             let free: Vec<(i32, i32)> = pac
@@ -240,6 +250,7 @@ impl Pac {
 
     /// Advance the ghosts by `dt` seconds and report who touched whom.
     pub fn step(&mut self, dt: f32, players: &[Target]) -> Vec<Hit> {
+        self.fit_pack(players);
         for index in 0..self.ghosts.len() {
             match self.ghosts[index].dead_for {
                 Some(left) if left - dt > 0.0 => self.ghosts[index].dead_for = Some(left - dt),
@@ -248,6 +259,60 @@ impl Pac {
             }
         }
         self.contacts(players)
+    }
+
+    /// Grow or shrink the pack towards `pack_size`, one ghost per step. A new
+    /// ghost appears well away from every player; a surplus one is taken from
+    /// the dead first, then from whichever wanderer is furthest from anyone,
+    /// so nobody watches a ghost blink out of existence.
+    fn fit_pack(&mut self, players: &[Target]) {
+        let want = pack_size(players.len()).min(self.pack_cap);
+        let near: Vec<(f32, f32)> = players.iter().map(|p| (p.x, p.y)).collect();
+        if self.ghosts.len() < want {
+            self.add_ghost(RESPAWN_CLEARANCE, &near);
+        } else if self.ghosts.len() > want + RETIRE_SLACK {
+            let alone = |g: &Ghost| {
+                let (x, y) = g.position();
+                near.iter()
+                    .map(|&(px, py)| (px - x).hypot(py - y))
+                    .fold(f32::INFINITY, f32::min)
+            };
+            let retire = self
+                .ghosts
+                .iter()
+                .position(|g| g.dead_for.is_some())
+                .or_else(|| {
+                    self.ghosts
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, g)| g.mode == Mode::Wander)
+                        .max_by(|(_, a), (_, b)| alone(a).total_cmp(&alone(b)))
+                        .map(|(i, _)| i)
+                });
+            if let Some(index) = retire {
+                self.ghosts.swap_remove(index);
+            }
+        }
+    }
+
+    /// A fresh ghost on the lowest free id, at least `clearance` from `avoid`
+    /// and from the ghosts already out.
+    fn add_ghost(&mut self, clearance: f32, avoid: &[(f32, f32)]) {
+        let Some(id) = (0..=u8::MAX).find(|id| self.ghosts.iter().all(|g| g.id != *id)) else {
+            return;
+        };
+        let mut avoid = avoid.to_vec();
+        avoid.extend(self.ghosts.iter().map(Ghost::position));
+        let cell = self.pick_far(&avoid, clearance);
+        self.ghosts.push(Ghost {
+            id,
+            from: cell,
+            to: cell,
+            progress: 0.0,
+            dir: None,
+            mode: Mode::Wander,
+            dead_for: None,
+        });
     }
 
     fn respawn(&mut self, index: usize, players: &[Target]) {
@@ -463,6 +528,7 @@ mod tests {
     fn lone_ghost(seed: u32) -> Pac {
         let mut pac = Pac::new(seed);
         pac.ghosts.truncate(1);
+        pac.pack_cap = 1;
         pac
     }
 
@@ -582,7 +648,41 @@ mod tests {
         assert!(pac.step(0.0, &[victim]).is_empty());
         victim.safe = false;
         assert_eq!(pac.step(0.0, &[victim]), [Hit::Caught { pid: 3 }]);
-        assert_eq!(pac.living(), usize::from(GHOSTS));
+        assert_eq!(pac.living(), GHOSTS_BASE);
+    }
+
+    /// The pack grows with the room, one ghost a step, up to the cap; new
+    /// ghosts keep their distance and take distinct ids. When the room
+    /// empties it only shrinks once the surplus passes the slack.
+    #[test]
+    fn the_pack_follows_the_room() {
+        let mut pac = Pac::new(5);
+        assert_eq!(pac.ghosts.len(), GHOSTS_BASE);
+        let crowd: Vec<Target> = (0..30)
+            .map(|i| player(i, (1.5 + (i % 5) as f32 * 2.0, 1.5), false))
+            .map(|p| Target { safe: true, ..p })
+            .collect();
+        assert_eq!(pack_size(30), GHOSTS_BASE + 10);
+        pac.step(DT, &crowd);
+        assert_eq!(pac.ghosts.len(), GHOSTS_BASE + 1, "one ghost a step");
+        for _ in 0..40 {
+            pac.step(DT, &crowd);
+        }
+        assert_eq!(pac.ghosts.len(), pack_size(30));
+        let mut ids: Vec<u8> = pac.ghosts.iter().map(|g| g.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), pack_size(30));
+        assert_eq!(pack_size(10_000), GHOSTS_MAX);
+
+        // Down to 24 players: 18 wanted, 20 out, inside the slack.
+        pac.step(DT, &crowd[..24]);
+        assert_eq!(pac.ghosts.len(), pack_size(30));
+        // Everyone gone: back to the base pack.
+        for _ in 0..40 {
+            pac.step(DT, &[]);
+        }
+        assert_eq!(pac.ghosts.len(), GHOSTS_BASE + RETIRE_SLACK);
     }
 
     /// A cherry is eaten from its tile and reappears at least eight tiles

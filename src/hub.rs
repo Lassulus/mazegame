@@ -5,9 +5,11 @@
 //! expires the whole world rolls over to a fresh maze. Only the seed and
 //! positions cross the wire — clients rebuild the geometry themselves.
 //!
-//! The Pac-Man layer: six ghosts and four cherries are simulated here (see
-//! `pac`), on a copy of the maze rebuilt from the same seed. Ghost positions
-//! ride at the end of every snapshot. The text messages around them:
+//! The Pac-Man layer: a pack of ghosts that grows with the room (ten, plus
+//! one per three players, at most 32) and four cherries are simulated here
+//! (see `pac`), on a copy of the maze rebuilt from the same seed. Ghost
+//! positions ride at the end of every snapshot. The text messages around
+//! them:
 //!
 //! - `welcome`, `watch` and `world` carry `"cherries":[[tx,ty],…]`, tiles
 //!   whose centre holds a cherry.
