@@ -213,6 +213,15 @@ and — for the first finisher only — arms a `ROUND_GRACE` (120 s) timer. Anyo
 still walking keeps playing and can still finish 2nd, 3rd, … When the timer
 expires every client gets `{"t":"world","seed":…}` and respawns.
 
+That message also carries the round that just ended: the first `RESULTS_TOP`
+(10) escapes in order with their time into the round and how many trips each
+made, and how many escaped in all. Both pages put it up as a board
+(`static/js/results.js`) for `INTERMISSION` (7 s) — gold, silver and bronze
+on top, your own row outlined, "+ 3 more" under the tenth, and a countdown.
+Meanwhile everyone stands on their new spawn: the server holds the round
+clock and keeps the ghosts off until the board is gone, so nobody gets a
+head start while the others read it.
+
 Reaching the logo does not park you there: the escape card holds you still for
 `WIN_DWELL` (2.6 s), then you are dropped back into the maze at a different
 spawn. The logo re-arms with you, so you can run it again — the card counts
@@ -451,6 +460,7 @@ static/
     interp.js    buffered playback on the server's tick clock, bodies and ghosts
     tags.js      pooled name tags above visible players
     effects.js   ghost bites and pops nearby, played where they happened
+    results.js   the end-of-round board
     play.js      input, collision, finish detection, rocks, cherry power,
                  catches, round clock
     watch.js     spectator camera with interpolation, no HUD

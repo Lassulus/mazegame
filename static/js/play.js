@@ -12,6 +12,7 @@ import {
   clockTime, liveGhosts, makeClock, makeTrack, pushSample, sampleTrack, syncGhosts,
 } from "./interp.js";
 import { createTouchControls, isTouch, wireFullscreen } from "./touch.js";
+import { showResults } from "./results.js";
 import { showVersion } from "./version.js";
 
 const WALK = 1.7; // tiles/second
@@ -43,6 +44,7 @@ const elOverlayText = document.getElementById("overlay-text");
 const elName = document.getElementById("playername");
 const elPower = document.getElementById("power");
 const elPowerLeft = document.getElementById("power-left");
+const elResults = document.getElementById("results");
 
 const renderer = new Renderer(view, { pixel: retroPixel() });
 const keys = new Set();
@@ -135,6 +137,15 @@ function connect(name) {
         setCherries(msg.cherries);
         state.endsAt = null;
         note(msg.winner ? `new maze · ${msg.winner} won the last one` : "new maze");
+        // The board is up and everyone waits on their new spawn until it
+        // goes; the clocks start when it does.
+        const pause = showResults(elResults, msg, { me: elName.textContent });
+        if (pause) {
+          const start = performance.now() + pause;
+          state.holdUntil = start;
+          state.startedAt = start;
+          state.runStartedAt = start;
+        }
       } else if (msg.t === "peers") {
         applyPeers(msg);
       } else if (msg.t === "finish") {

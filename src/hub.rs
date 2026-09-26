@@ -12,7 +12,10 @@
 //! them:
 //!
 //! - `welcome`, `watch` and `world` carry `"cherries":[[tx,ty],…]`, tiles
-//!   whose centre holds a cherry.
+//!   whose centre holds a cherry. `world` (a new round) also carries the
+//!   last round's board, `"results":[…]` (first `RESULTS_TOP` escapes) and
+//!   `"escaped":n`, and `"pause"`: seconds of `INTERMISSION` everyone waits
+//!   on their spawn while it is shown.
 //! - `{"t":"cherries","l":[…]}` to everyone when one is eaten (it reappears
 //!   elsewhere at once), and `{"t":"power","ms":…}` to the eater.
 //! - `{"t":"ate","ghost":id}` to a powered player who ran into a ghost.
@@ -56,6 +59,11 @@ const SAFE_TIME: Duration = Duration::from_secs(3);
 /// Longest step the ghosts take in one go. A stalled tick must not let them
 /// leap through a corridor, or through the player they were about to touch.
 const MAX_STEP: Duration = Duration::from_millis(200);
+/// Between rounds: the leaderboard is up and everyone stands on their new
+/// spawn, so nobody gets a head start while the others are reading it.
+const INTERMISSION: Duration = Duration::from_secs(7);
+/// Escapes named on that leaderboard; the rest are a count.
+const RESULTS_TOP: usize = 10;
 
 /// Tiles per interest bucket edge while the room is small.
 const BUCKET: f32 = 8.0;
@@ -269,9 +277,40 @@ pub struct Watcher {
 
 #[derive(Clone)]
 struct Finisher {
+    pid: u32,
     name: String,
     place: usize,
+    /// Seconds into the round of the first escape.
     secs: f32,
+    /// Trips through the logo this round, the first included.
+    runs: u32,
+}
+
+impl Finisher {
+    fn json(&self) -> String {
+        format!(
+            "{{\"name\":{},\"place\":{},\"secs\":{:.1},\"runs\":{}}}",
+            json::quote(&self.name),
+            self.place,
+            self.secs,
+            self.runs
+        )
+    }
+}
+
+/// The leaderboard the `world` message carries when a round ends: the first
+/// `RESULTS_TOP` escapes in order, and how many escaped in all.
+fn results_members(finishers: &[Finisher]) -> String {
+    let top: Vec<String> = finishers
+        .iter()
+        .take(RESULTS_TOP)
+        .map(Finisher::json)
+        .collect();
+    format!(
+        "\"results\":[{}],\"escaped\":{}",
+        top.join(","),
+        finishers.len()
+    )
 }
 
 #[derive(Clone, Copy, Default)]
@@ -369,14 +408,7 @@ impl Hub {
         let finishers = state
             .finishers
             .iter()
-            .map(|f| {
-                format!(
-                    "{{\"name\":{},\"place\":{},\"secs\":{:.1}}}",
-                    json::quote(&f.name),
-                    f.place,
-                    f.secs
-                )
-            })
+            .map(Finisher::json)
             .collect::<Vec<_>>()
             .join(",");
         format!(
@@ -562,10 +594,14 @@ impl Hub {
                 // winner who closes their tab must still be credited when the
                 // maze rolls over.
                 state.finishers.push(Finisher {
+                    pid,
                     name: name.clone(),
                     place: places + 1,
                     secs,
+                    runs,
                 });
+            } else if let Some(f) = state.finishers.iter_mut().find(|f| f.pid == pid) {
+                f.runs = runs;
             }
             let place = state
                 .players
@@ -595,15 +631,20 @@ impl Hub {
         self.broadcast(&frame);
     }
 
+    /// The countdown ran out: announce the results and hand out a new maze.
+    /// Everybody stands still on their new spawn for `INTERMISSION` while the
+    /// leaderboard is up, so the round clock (and the ghosts' patience) only
+    /// starts once the board is gone.
     fn new_round(&self) {
         let frame = {
             let mut state = lock(&self.state);
             let now = Instant::now();
             let winner = state.finishers.first().map(|f| f.name.clone());
+            let results = results_members(&state.finishers);
             state.seed = new_seed();
             state.pac = Pac::new(state.seed);
             state.last_step = now;
-            state.round_started = now;
+            state.round_started = now + INTERMISSION;
             state.deadline = None;
             state.finishers.clear();
             for player in state.players.iter_mut() {
@@ -614,14 +655,16 @@ impl Hub {
                 player.placed = false;
                 player.last_move = now;
                 player.powered_until = None;
-                player.safe_until = Some(now + SAFE_TIME);
+                player.safe_until = Some(now + INTERMISSION.max(SAFE_TIME));
             }
             let winner = winner.map_or_else(|| "null".to_string(), |name| json::quote(&name));
             format!(
-                "{{\"t\":\"world\",\"seed\":{},\"winner\":{},\"cherries\":{}}}",
+                "{{\"t\":\"world\",\"seed\":{},\"winner\":{},\"cherries\":{},{},\"pause\":{:.1}}}",
                 state.seed,
                 winner,
-                state.pac.cherries_json()
+                state.pac.cherries_json(),
+                results,
+                INTERMISSION.as_secs_f32()
             )
         };
         self.broadcast(&frame);
@@ -1522,5 +1565,31 @@ mod tests {
             "{text}"
         );
         assert!(fresh_names(&mut known, &[2, 1], &roster).is_none());
+    }
+
+    /// The end-of-round board names the first ten escapes in order, with
+    /// their time and trips, and counts everyone who escaped.
+    #[test]
+    fn results_name_the_first_ten_and_count_the_rest() {
+        let finishers: Vec<Finisher> = (1..=13)
+            .map(|place| Finisher {
+                pid: place as u32,
+                name: format!("p{place}"),
+                place,
+                secs: place as f32 * 10.0,
+                runs: if place == 1 { 3 } else { 1 },
+            })
+            .collect();
+        let text = format!("{{{}}}", results_members(&finishers));
+        assert!(
+            text.starts_with(r#"{"results":[{"name":"p1","place":1,"secs":10.0,"runs":3},"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""name":"p10""#) && !text.contains(r#""name":"p11""#),
+            "{text}"
+        );
+        assert!(text.ends_with(r#"],"escaped":13}"#), "{text}");
+        assert_eq!(results_members(&[]), r#""results":[],"escaped":0"#);
     }
 }

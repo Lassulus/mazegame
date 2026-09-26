@@ -11,6 +11,7 @@ import {
 } from "./interp.js";
 import { FINISHED, FLIPPED, POWERED, createSocket } from "./net.js";
 import { drawQr } from "./qr.js";
+import { showResults } from "./results.js";
 
 const PEER_TTL = 8; // snapshots a body may go unmentioned before it is dropped
 // A camera that moves further than this in one frame has watched its player
@@ -23,6 +24,7 @@ const elPlaying = document.getElementById("playing");
 const elPlayers = document.getElementById("players");
 const elWatching = document.getElementById("watching");
 const elTarget = document.getElementById("target");
+const elResults = document.getElementById("results");
 
 const renderer = new Renderer(view, { pixel: retroPixel() });
 
@@ -92,6 +94,7 @@ const socket = createSocket("/ws/watch", {
       state.taken.clear();
       state.ghosts.clear();
       setCherries(msg.cherries);
+      showResults(elResults, msg);
     } else if (msg.t === "cherries") {
       setCherries(msg.l);
     } else if (msg.t === "bite" || msg.t === "pop") {
